@@ -4,7 +4,7 @@ use gpui_kit::*;
 use crate::style::{WINDOW_RESIZE_CORNER, WINDOW_RESIZE_EDGE};
 
 /// 构造覆盖内容边缘的透明缩放热区，按下后交给窗口系统处理拖拽。
-pub(super) fn handles() -> impl Iterator<Item = Div> {
+pub(in crate::app) fn handles() -> impl Iterator<Item = Div> {
     use CursorStyle::*;
     use ResizeEdge::*;
 

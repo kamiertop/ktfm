@@ -4,14 +4,13 @@ use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::app::App;
 use crate::components::icon_button;
 use crate::model::{FileEntry, ViewMode, entries};
 use crate::style::{FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, icon_color};
 
-use super::App;
-
 impl App {
-    pub(super) fn file_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(in crate::app) fn file_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let location = self.location();
         let query = self.search.read(cx).value().trim().to_lowercase();
         let mut files = entries(location);

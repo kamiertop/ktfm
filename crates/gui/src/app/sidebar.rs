@@ -4,13 +4,16 @@ use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::app::App;
 use crate::model::SIDEBAR;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color, sidebar_divider_color};
 
-use super::App;
-
 impl App {
-    pub(super) fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(in crate::app) fn sidebar(
+        &self,
+        radius: Pixels,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let location = self.location();
         let theme = cx.theme();
         let divider = sidebar_divider_color(theme.mode);

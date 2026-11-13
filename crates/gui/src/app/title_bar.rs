@@ -4,14 +4,13 @@ use gpui_kit::component::{Disableable, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
+use crate::app::App;
 use crate::components::{icon_button, title_bar, with_tooltip};
 use crate::model::HOME;
 use crate::style::{SEARCH_MAX_WIDTH, TITLE_ICON_SIZE};
 
-use super::App;
-
 impl App {
-    pub(super) fn title_bar(
+    pub(in crate::app) fn title_bar(
         &self,
         window: &mut Window,
         radius: Pixels,

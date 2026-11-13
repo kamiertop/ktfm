@@ -1,17 +1,17 @@
+use crate::assets::window_restore;
+use crate::style::WINDOW_CONTROL_ICON_SIZE;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
-use gpui_kit::prelude::*;
-use gpui_kit::*;
-
-use crate::style::WINDOW_CONTROL_ICON_SIZE;
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::{App, IntoElement, ParentElement, Styled, Window};
 
 pub(super) fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
     let supported = window.window_controls();
     let (zoom_icon, zoom_label) = if window.is_maximized() {
-        (IconName::Copy, "还原窗口")
+        (window_restore(), "还原窗口")
     } else {
-        (IconName::Square, "最大化")
+        (Icon::new(IconName::Square), "最大化")
     };
     let theme = cx.theme();
     let normal = ButtonCustomVariant::new(cx)
@@ -26,8 +26,13 @@ pub(super) fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
         .gap_1()
         .when(supported.minimize, |row| {
             row.child(
-                control("window-minimize", IconName::Minus, "最小化", normal)
-                    .on_click(|_, window, _| window.minimize_window()),
+                control(
+                    "window-minimize",
+                    Icon::new(IconName::Minus),
+                    "最小化",
+                    normal,
+                )
+                .on_click(|_, window, _| window.minimize_window()),
             )
         })
         .when(supported.maximize, |row| {
@@ -37,20 +42,25 @@ pub(super) fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
             )
         })
         .child(
-            control("window-close", IconName::X, "关闭窗口", close)
-                .on_click(|_, window, _| window.remove_window()),
+            control(
+                "window-close",
+                Icon::new(IconName::X),
+                "关闭窗口",
+                close,
+            )
+            .on_click(|_, window, _| window.remove_window()),
         )
 }
 
 fn control(
     id: &'static str,
-    icon: IconName,
+    icon: Icon,
     label: &'static str,
     variant: ButtonCustomVariant,
 ) -> Button {
     Button::new(id)
         .custom(variant)
         .size_8()
-        .child(Icon::new(icon).size(WINDOW_CONTROL_ICON_SIZE))
+        .child(icon.size(WINDOW_CONTROL_ICON_SIZE))
         .accessibility_label(label)
 }
