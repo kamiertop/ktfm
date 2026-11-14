@@ -42,13 +42,8 @@ pub(super) fn window_controls(window: &Window, cx: &App) -> impl IntoElement {
             )
         })
         .child(
-            control(
-                "window-close",
-                Icon::new(IconName::X),
-                "关闭窗口",
-                close,
-            )
-            .on_click(|_, window, _| window.remove_window()),
+            control("window-close", Icon::new(IconName::X), "关闭窗口", close)
+                .on_click(|_, window, _| window.remove_window()),
         )
 }
 

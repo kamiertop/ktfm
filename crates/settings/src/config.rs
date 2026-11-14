@@ -1,20 +1,20 @@
 pub mod action;
 pub mod general;
-pub mod view;
 pub mod operations;
+pub mod view;
 
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
-use std::io::Write;
-use directories::{ProjectDirs};
-use serde::{Deserialize, Serialize};
 
 pub use action::ActionConfig;
 pub use general::GeneralConfig;
-pub use view::ViewConfig;
 pub use operations::OperationsConfig;
+pub use view::ViewConfig;
 
-use crate::error::{Result,Error};
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 // 缺字段时用默认值补齐，兼容旧版本配置和空文件
@@ -45,7 +45,7 @@ impl AppConfig {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 Self::write_default_config_file(config_dir)?;
                 fs::read_to_string(&config_file)?
-            },
+            }
             Err(e) => return Err(e.into()),
         };
 
@@ -58,25 +58,17 @@ impl AppConfig {
         let config_file = config_dir.join(CONFIG_FILE_NAME);
         let toml_str = toml::to_string_pretty(&Self::default())?;
 
-        let tmp = Self::tmp_path_for(&config_file);
-        fs::write(&tmp, toml_str)?;
-        Self::inherit_mode(&config_file, &tmp)?;
-        // 使用硬链接，不会存在文件已创建，但内容不完整的时间窗口
-        match fs::hard_link(&tmp, &config_file) {
-            Ok(()) => {},
-            // 其他实例已创建，不覆盖
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {},
-            Err(e) => return Err(e.into()),
-        }
-        // 清理临时文件，失败可忽略
-        let _ = fs::remove_file(&tmp);
-
-        Ok(())
+        // 使用硬链接发布完整文件，其他实例已创建配置时保留现有文件。
+        Self::write_config(&config_file, &toml_str, |tmp, target| {
+            match fs::hard_link(tmp, target) {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                result => result,
+            }
+        })
     }
 
     pub fn save_to_file(&self) -> Result<()> {
-        let project_dirs = ProjectDirs::from("", "", APP_NAME)
-            .ok_or(Error::NoConfigDir)?;
+        let project_dirs = ProjectDirs::from("", "", APP_NAME).ok_or(Error::NoConfigDir)?;
         self.save_to(project_dirs.config_dir())
     }
 
@@ -91,22 +83,44 @@ impl AppConfig {
 
     /// 原子写入：先写临时文件，再 rename 替换目标
     fn atomic_write(path: &Path, content: &str) -> Result<()> {
+        Self::write_config(path, content, |tmp, target| fs::rename(tmp, target))
+    }
+
+    fn write_config(
+        path: &Path,
+        content: &str,
+        publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    ) -> Result<()> {
         let tmp_path = Self::tmp_path_for(path);
-        let mut file = fs::File::create(&tmp_path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        Self::inherit_mode(path, &tmp_path)?;
-        fs::rename(&tmp_path, path)?;
-        
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = fs::File::open(parent) {
-                let _ = dir.sync_all(); // 刷新目录项，防止崩溃后 rename 结果丢失
-            }
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
 
-        Ok(())
+        let mut file = options.open(&tmp_path)?;
+        let result = (|| {
+            file.write_all(content.as_bytes())?;
+            Self::inherit_mode(path, &tmp_path)?;
+            file.sync_all()?;
+            drop(file);
+            publish(&tmp_path, path)?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&tmp_path);
+
+        #[cfg(unix)]
+        if result.is_ok()
+            && let Some(parent) = path.parent()
+            && let Ok(dir) = fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+
+        result
     }
 
     /// 对齐 tmp 权限：目标已存在则沿用其权限，新建文件则为 0600
@@ -225,7 +239,11 @@ mod tests {
         let a = AppConfig::tmp_path_for(target);
         let b = AppConfig::tmp_path_for(target);
 
-        assert_eq!(a.parent(), target.parent(), "tmp 必须和目标同目录（rename 原子性前提）");
+        assert_eq!(
+            a.parent(),
+            target.parent(),
+            "tmp 必须和目标同目录（rename 原子性前提）"
+        );
         assert!(a.to_string_lossy().ends_with(".tmp"));
         assert_ne!(a, b, "两次生成的路径应不同，避免并发冲突");
     }
@@ -238,7 +256,8 @@ mod tests {
 
         let content = fs::read_to_string(dir.join(CONFIG_FILE_NAME)).unwrap();
         toml::from_str::<AppConfig>(&content).expect("默认配置内容必须是合法 TOML 且能解析");
-        let leftovers = fs::read_dir(&dir).unwrap()
+        let leftovers = fs::read_dir(&dir)
+            .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .count();
@@ -260,6 +279,29 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_cleans_up_after_failed_rename() {
+        let dir = temp_dir("atomic-failure");
+        let target = dir.join(CONFIG_FILE_NAME);
+        fs::create_dir(&target).unwrap();
+
+        assert!(AppConfig::atomic_write(&target, "a = 1").is_err());
+        assert!(target.is_dir());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn load_accepts_legacy_zoom_action() {
+        use action::CtrlWheelAction;
+
+        let config: AppConfig = toml::from_str("[actions]\nctrl_wheel = \"zome_view\"").unwrap();
+        assert!(matches!(
+            config.actions.ctrl_wheel,
+            CtrlWheelAction::ZoomView
+        ));
+    }
+
+    #[test]
     fn load_from_missing_dir_returns_defaults() {
         let dir = std::env::temp_dir().join(format!("ktfm-test-load1-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir); // 确保目录不存在
@@ -275,7 +317,11 @@ mod tests {
     #[test]
     fn load_from_reads_existing() {
         let dir = temp_dir("load2");
-        fs::write(dir.join(CONFIG_FILE_NAME), "[view]\nshow_hidden_files = true\n").unwrap();
+        fs::write(
+            dir.join(CONFIG_FILE_NAME),
+            "[view]\nshow_hidden_files = true\n",
+        )
+        .unwrap();
 
         let config = AppConfig::load_from(&dir).unwrap();
 
@@ -290,7 +336,10 @@ mod tests {
 
         let err = AppConfig::load_from(&dir).unwrap_err();
 
-        assert!(matches!(err, Error::ConfigParse(_)), "应报解析错误，实际: {err:?}");
+        assert!(
+            matches!(err, Error::ConfigParse(_)),
+            "应报解析错误，实际: {err:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

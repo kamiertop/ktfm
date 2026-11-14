@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "snake_case")]
@@ -18,4 +18,3 @@ pub enum ViewMode {
     /// 网格视图
     Grid,
 }
-

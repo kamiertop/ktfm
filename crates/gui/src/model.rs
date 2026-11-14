@@ -12,6 +12,13 @@ pub struct Location {
     pub icon: IconName,
 }
 
+impl Location {
+    pub fn parent(self) -> Option<Self> {
+        // 侧栏中的独立位置不属于主文件夹。
+        FOLDERS[1..].contains(&self).then_some(HOME)
+    }
+}
+
 pub const HOME: Location = Location {
     name: "主文件夹",
     icon: IconName::House,

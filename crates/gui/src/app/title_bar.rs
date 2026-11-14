@@ -1,7 +1,6 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Icon, h_flex};
-use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use crate::app::App;
@@ -58,7 +57,7 @@ impl App {
                     ),
             );
 
-        // 两处拖拽区各自记录按下状态，避免区外按下事件清除另一处的状态。
+        // 两处拖拽区独立记录按下状态，区外点击只清除对应区域的状态。
         let title_drag = window.use_state(cx, |_, _| false);
         let toolbar_drag = window.use_state(cx, |_, _| false);
         title_bar(
@@ -70,8 +69,7 @@ impl App {
                 cx.notify();
             }),
             window,
-            title_drag,
-            toolbar_drag,
+            [title_drag, toolbar_drag],
             cx,
         )
     }

@@ -1,12 +1,11 @@
-use gpui_kit::base::StyledExt;
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
-use gpui_kit::prelude::*;
-use gpui_kit::*;
-
 use crate::app::App;
 use crate::model::SIDEBAR;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color, sidebar_divider_color};
+use gpui_kit::base::StyledExt;
+use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
 
 impl App {
     pub(in crate::app) fn sidebar(

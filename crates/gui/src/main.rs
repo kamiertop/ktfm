@@ -1,8 +1,8 @@
 mod app;
+mod assets;
 mod components;
 mod model;
 mod style;
-mod assets;
 
 use gpui_kit::assets::AllAssets;
 use gpui_kit::component::TitleBar;

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::command::AppCommand;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -70,13 +70,15 @@ pub enum BlankDoubleClickAction {
 pub enum CtrlWheelAction {
     /// 放大或缩小
     #[default]
-    ZomeView,
+    #[serde(alias = "zome_view")]
+    ZoomView,
     /// 无操作
     None,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[serde(default)]
 pub struct DragConfig {
     /// 是否启用拖拽功能，默认开启
     pub enable: bool,
@@ -157,8 +159,12 @@ impl FolderMiddleClickAction {
     pub fn to_command(self, path: &std::path::Path) -> Option<AppCommand> {
         match self {
             FolderMiddleClickAction::None => None,
-            FolderMiddleClickAction::OpenInNewTab => Some(AppCommand::CreateNewTab(path.to_path_buf())),
-            FolderMiddleClickAction::OpenInNewWindow => Some(AppCommand::OpenNewWindow(path.to_path_buf())),
+            FolderMiddleClickAction::OpenInNewTab => {
+                Some(AppCommand::CreateNewTab(path.to_path_buf()))
+            }
+            FolderMiddleClickAction::OpenInNewWindow => {
+                Some(AppCommand::OpenNewWindow(path.to_path_buf()))
+            }
         }
     }
 }

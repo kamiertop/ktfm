@@ -13,8 +13,7 @@ pub fn title_bar(
     show_settings: bool,
     toggle_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
-    title_drag: Entity<bool>,
-    toolbar_drag: Entity<bool>,
+    [title_drag, toolbar_drag]: [Entity<bool>; 2],
     cx: &App,
 ) -> impl IntoElement {
     let mode = cx.theme().mode;

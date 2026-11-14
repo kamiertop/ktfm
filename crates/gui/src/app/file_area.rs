@@ -24,6 +24,7 @@ impl App {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .child(self.path_breadcrumb(cx))
             .when(self.show_settings, |area| {
                 area.child(
                     h_flex()
