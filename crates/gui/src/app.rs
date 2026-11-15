@@ -1,9 +1,13 @@
 mod breadcrumb;
+mod browser;
 mod file_area;
 mod sidebar;
+mod tabs;
+mod tags;
 mod title_bar;
+mod view;
+mod volumes;
 mod window_resize;
 
-mod view;
-
+pub use tabs::NewTab;
 pub use view::App;

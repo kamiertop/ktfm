@@ -9,7 +9,7 @@ pub struct ViewConfig {
     pub show_hidden_files: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewMode {
     /// 列表视图

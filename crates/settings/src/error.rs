@@ -5,6 +5,15 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("标签数据库错误: {0}")]
+    TagDatabase(#[from] turso::Error),
+
+    #[error("标签数据库数据无法解析: {0}")]
+    InvalidTagData(String),
+
+    #[error("标签路径编码错误: {0}")]
+    TagPathEncoding(#[from] serde_json::Error),
+
     #[error("无法确定用户配置目录")]
     NoConfigDir,
 

@@ -1,7 +1,10 @@
 pub mod action;
 pub mod general;
 pub mod operations;
+pub mod star;
+pub mod tab;
 pub mod view;
+pub mod workspace;
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -26,7 +29,7 @@ pub struct AppConfig {
     pub operations: OperationsConfig,
 }
 
-const APP_NAME: &str = "ktfm";
+pub(crate) const APP_NAME: &str = "ktfm";
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 impl AppConfig {

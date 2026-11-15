@@ -6,3 +6,10 @@ edition = "2024"
 [dependencies]
 gpui-kit = "0.9"
 anyhow.workspace = true
+directories.workspace = true
+settings = { path = "../settings" }
+sys = { path = "../sys" }
+vfs = { path = "../vfs" }
+
+hex_color.workspace = true
+uuid.workspace = true
