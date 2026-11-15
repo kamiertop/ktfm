@@ -70,6 +70,7 @@ impl Browser {
 
 impl App {
     pub(super) fn load_directory(&mut self, cx: &mut Context<Self>) {
+        self.file_item_menu.clear();
         let source = self.current_location().map(|location| match location {
             Location::Directory { path } => ReadSource::Directory(path.0.clone()),
             Location::Tag { id } => self.tags.get(*id).map_or(ReadSource::MissingTag, |tag| {
@@ -216,6 +217,16 @@ impl App {
             return;
         }
 
+        self.open_file_target(path, kind, window, cx);
+    }
+
+    pub(super) fn open_file_target(
+        &mut self,
+        path: PathBuf,
+        kind: EntryKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let generation = self.browser.generation;
         self.browser.open_error = None;
         cx.notify();

@@ -1,3 +1,5 @@
+use settings::config::bookmark::BookmarkKind;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Icon, h_flex};
@@ -19,16 +21,16 @@ impl App {
         let default_favorite = self
             .location()
             .is_some_and(|path| self.is_default_favorite(path));
-        let starred = default_favorite
+        let bookmarked = default_favorite
             || self
                 .location()
-                .is_some_and(|path| self.workspace.stars.find(path).is_some());
-        let star_label = if default_favorite {
-            "默认收藏"
-        } else if starred {
-            "取消收藏"
+                .is_some_and(|path| self.bookmarks.read(cx).find(path).is_some());
+        let bookmark_label = if default_favorite {
+            "默认位置"
+        } else if bookmarked {
+            "从书签移除"
         } else {
-            "收藏当前目录"
+            "将当前目录添加到书签"
         };
         let navigation = h_flex()
             .w_full()
@@ -68,15 +70,15 @@ impl App {
                 "刷新",
             ))
             .child(with_tooltip(
-                icon_button("favorite-directory", IconName::Star, star_label)
-                    .toggled(starred)
+                icon_button("bookmark-directory", IconName::Bookmark, bookmark_label)
+                    .toggled(bookmarked)
                     .disabled(default_favorite || self.location().is_none())
                     .on_click(cx.listener(|this, _, _, cx| {
                         if let Some(path) = this.location().map(ToOwned::to_owned) {
-                            this.toggle_star(path, cx);
+                            this.toggle_bookmark(path, BookmarkKind::Directory, cx);
                         }
                     })),
-                star_label,
+                bookmark_label,
             ))
             .child(self.new_tab_button(cx))
             .child(

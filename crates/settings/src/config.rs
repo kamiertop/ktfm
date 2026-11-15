@@ -1,8 +1,9 @@
 pub mod action;
+pub mod bookmark;
+mod font;
 pub mod general;
 pub mod operations;
 pub mod shortcuts;
-pub mod star;
 pub mod tab;
 pub mod view;
 pub mod workspace;

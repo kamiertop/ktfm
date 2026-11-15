@@ -13,7 +13,9 @@ use super::App;
 use super::tabs::{CloseTab, NewTab};
 use super::window_resize;
 use crate::components::preferences_title_bar;
-use crate::style::WINDOW_RADIUS;
+use crate::style::{APP_ID, WINDOW_RADIUS};
+
+actions!(browser, [OpenPreferences]);
 
 const PREFERENCES_SIDEBAR_WIDTH: Pixels = px(176.);
 
@@ -68,6 +70,7 @@ impl App {
         let middle_click_tab = self.config.actions.middle_click_tab;
         let shortcuts = self.config.shortcuts.clone();
         let options = WindowOptions {
+            app_id: Some(APP_ID.into()),
             window_bounds: Some(WindowBounds::centered(size(px(820.), px(580.)), cx)),
             window_min_size: Some(size(px(640.), px(460.))),
             titlebar: Some(TitlebarOptions {
@@ -428,8 +431,8 @@ pub(super) fn shortcut_bindings(
     cx: &gpui_kit::App,
 ) -> Result<[KeyBinding; 2], String> {
     let parse = |value: &str, label: &str| {
-        let key = Keystroke::parse_with_os(value, cx.platform_info().os)
-            .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
+        let key =
+            Keystroke::parse(value).map_err(|error| format!("{label}的快捷键无效：{error}"))?;
         if value.split_whitespace().count() != 1
             || key.key.is_empty()
             || !(key.modifiers.control || key.modifiers.alt || key.modifiers.platform)
@@ -440,6 +443,10 @@ pub(super) fn shortcut_bindings(
     };
     let new = parse(&shortcuts.new_tab, "新建标签页")?;
     let close = parse(&shortcuts.close_tab, "关闭标签页")?;
+    let preferences = parse("ctrl-p", "偏好设置")?;
+    if new == preferences || close == preferences {
+        return Err("Ctrl+P 已用于打开偏好设置".into());
+    }
     if new == close {
         return Err("两个操作不能使用相同的快捷键".into());
     }
@@ -458,7 +465,7 @@ fn key_binding(value: &str, action: impl Action, cx: &gpui_kit::App) -> Result<K
         Some(context.into()),
         false,
         None,
-        cx,
+        cx.keyboard_mapper().as_ref(),
     )
     .map_err(|error| error.to_string())
 }

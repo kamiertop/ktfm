@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use super::{APP_NAME, AppConfig, star::Star, tab::Session};
+use super::{APP_NAME, AppConfig, bookmark::Bookmarks, tab::Session};
 use crate::{Error, Result};
 
 const FILE_NAME: &str = "workspace.toml";
@@ -14,7 +14,8 @@ const FILE_NAME: &str = "workspace.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Workspace {
-    pub stars: Star,
+    #[serde(alias = "stars")]
+    pub bookmarks: Bookmarks,
     pub session: Session,
 }
 
@@ -87,12 +88,13 @@ impl std::borrow::Borrow<Path> for SavedPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::bookmark::BookmarkKind;
     use crate::config::tab::{Location, TabItem};
 
     use uuid::Uuid;
 
     #[test]
-    fn restores_favorites_and_active_tab() -> Result<()> {
+    fn restores_bookmarks_and_active_tab() -> Result<()> {
         let dir = std::env::temp_dir().join(format!("ktfm-test-workspace-{}", std::process::id()));
         fs::create_dir(&dir)?;
         let result = (|| {
@@ -101,8 +103,20 @@ mod tests {
 
             let mut workspace = Workspace::default();
             let directory = dir.join("照片");
-            let favorite = workspace.stars.add(directory.clone(), None);
-            assert_eq!(workspace.stars.add(directory.clone(), None), favorite);
+            let favorite = workspace
+                .bookmarks
+                .add(directory.clone(), BookmarkKind::Directory);
+            assert_eq!(
+                workspace
+                    .bookmarks
+                    .add(directory.clone(), BookmarkKind::Directory),
+                favorite
+            );
+            let file_path = dir.join("照片.jpg");
+            let bookmark = workspace
+                .bookmarks
+                .add(file_path.clone(), BookmarkKind::File);
+            workspace.bookmarks.rename(bookmark, Some("封面".into()));
             let tag = Uuid::new_v4();
             let id = Uuid::new_v4();
             workspace.session.tabs = vec![
@@ -119,13 +133,30 @@ mod tests {
             workspace.save_to(&file)?;
 
             let restored = Workspace::load_from(&file)?;
-            assert_eq!(restored.stars.find(&directory).unwrap().id, favorite);
+            assert_eq!(restored.bookmarks.find(&directory).unwrap().id, favorite);
+            let file_bookmark = restored.bookmarks.find(&file_path).unwrap();
+            assert_eq!(file_bookmark.kind, BookmarkKind::File);
+            assert_eq!(file_bookmark.label.as_deref(), Some("封面"));
             assert_eq!(restored.session.active, Some(id));
             assert_eq!(restored.session.tabs[1].location, Location::Tag { id: tag });
             Ok(())
         })();
         fs::remove_dir_all(dir)?;
         result
+    }
+
+    #[test]
+    fn reads_legacy_stars_as_directory_bookmarks() -> Result<()> {
+        let id = Uuid::new_v4();
+        let workspace: Workspace = toml::from_str(&format!(
+            "[[stars.items]]\nid = \"{id}\"\npath = \"/tmp/example\"\n"
+        ))?;
+        let bookmark = workspace.bookmarks.get(id).unwrap();
+        assert_eq!(bookmark.path.0, Path::new("/tmp/example"));
+        assert_eq!(bookmark.kind, BookmarkKind::Directory);
+        assert!(bookmark.label.is_none());
+        assert!(toml::to_string_pretty(&workspace)?.contains("[[bookmarks.items]]"));
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -135,10 +166,10 @@ mod tests {
 
         let raw = PathBuf::from(OsString::from_vec(b"/tmp/non-utf8-\xff".to_vec()));
         let mut workspace = Workspace::default();
-        workspace.stars.add(raw.clone(), None);
+        workspace.bookmarks.add(raw.clone(), BookmarkKind::File);
         let content = toml::to_string_pretty(&workspace)?;
         let restored: Workspace = toml::from_str(&content)?;
-        assert!(restored.stars.find(&raw).is_some());
+        assert!(restored.bookmarks.find(&raw).is_some());
         Ok(())
     }
 }

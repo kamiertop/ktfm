@@ -1,4 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use settings::config::bookmark::BookmarkKind;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt as _;
@@ -10,6 +12,7 @@ use gpui_kit::*;
 use settings::config::tab::Location;
 
 use super::App;
+use super::bookmarks::BookmarkDrag;
 use super::tags::tag_color;
 use crate::components::icon_button;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color, sidebar_divider_color};
@@ -19,18 +22,6 @@ impl App {
         self.default_favorites
             .iter()
             .any(|item| item.path.as_deref() == Some(path))
-    }
-
-    pub(super) fn toggle_star(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if self.is_default_favorite(&path) {
-            return;
-        }
-        if let Some(item) = self.workspace.stars.find(&path) {
-            self.workspace.stars.remove(item.id);
-        } else {
-            self.workspace.stars.add(path, None);
-        }
-        self.save_workspace(cx);
     }
 
     pub(super) fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
@@ -43,39 +34,60 @@ impl App {
         );
         let entity = cx.entity().downgrade();
         let location = self.location();
-        let favorites = self
-            .workspace
-            .stars
+        let bookmarks = self
+            .bookmarks
+            .read(cx)
             .items()
             .iter()
-            .filter(|item| !self.is_default_favorite(&item.path.0))
-            .map(|item| {
-                let id = item.id;
-                let path = item.path.0.clone();
-                let (name, _) = self.path_appearance(&path);
-                let entity = entity.clone();
-                sidebar_row(
-                    SharedString::from(format!("favorite-{id}")),
-                    name,
-                    IconName::Star,
-                    item.color.map(tag_color),
-                    Some(path.as_path()) == location,
-                    cx,
-                )
-                .cursor_pointer()
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.navigate(path.clone(), window, cx)),
-                )
-                .context_menu(move |menu, _, _| {
-                    let entity = entity.clone();
-                    menu.item(PopupMenuItem::new("取消收藏").on_click(move |_, _, cx| {
-                        let _ = entity.update(cx, |this, cx| {
-                            this.workspace.stars.remove(id);
-                            this.save_workspace(cx);
-                        });
+            .filter(|item| !self.is_default_favorite(&item.path.0));
+        let has_bookmarks = bookmarks.clone().next().is_some();
+        let next_ids = bookmarks.clone().skip(1).map(|item| Some(item.id));
+        let bookmarks =
+            bookmarks
+                .zip(next_ids.chain(std::iter::once(None)))
+                .map(|(item, next_id)| {
+                    let id = item.id;
+                    let path = item.path.0.as_path();
+                    let name = self.bookmark_label(item);
+                    let icon = if item.kind == BookmarkKind::Directory {
+                        IconName::Folder
+                    } else {
+                        IconName::File
+                    };
+                    let color = item.color.map(tag_color);
+                    sidebar_row(
+                        SharedString::from(format!("bookmark-{id}")),
+                        name.clone(),
+                        icon,
+                        color,
+                        Some(path) == location,
+                        cx,
+                    )
+                    .cursor_pointer()
+                    .on_drag(
+                        BookmarkDrag::Existing {
+                            id,
+                            name,
+                            icon,
+                            color,
+                        },
+                        BookmarkDrag::preview,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_bookmark(id, window, cx);
                     }))
-                })
-            });
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_bookmark_menu(id, event.position, window, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .relative()
+                    .child(bookmark_drop_half(Some(id), true, cx))
+                    .child(bookmark_drop_half(next_id, false, cx))
+                });
 
         let tags = self.tags.items().iter().map(|tag| {
             let id = tag.id;
@@ -154,25 +166,34 @@ impl App {
             .child(
                 v_flex()
                     .gap_0p5()
-                    .children(self.default_favorites.iter().map(|item| {
-                        sidebar_row(
-                            item.name,
-                            item.name.to_owned(),
-                            item.icon,
-                            None,
-                            item.path.is_some() && item.path.as_deref() == location,
-                            cx,
-                        )
-                        .when(item.path.is_none(), |row| row.opacity(0.5))
-                        .when_some(item.path.clone(), |row, path| {
-                            row.cursor_pointer().on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.navigate(path.clone(), window, cx);
-                                },
-                            ))
-                        })
-                    }))
-                    .children(favorites),
+                    .children(
+                        self.default_favorites
+                            .iter()
+                            .enumerate()
+                            .map(|(index, item)| {
+                                sidebar_row(
+                                    item.name,
+                                    item.name.to_owned(),
+                                    item.icon,
+                                    None,
+                                    item.path.is_some() && item.path.as_deref() == location,
+                                    cx,
+                                )
+                                .when(item.path.is_none(), |row| row.opacity(0.5))
+                                .when_some(item.path.clone(), |row, path| {
+                                    row.cursor_pointer().on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.navigate(path.clone(), window, cx);
+                                        },
+                                    ))
+                                })
+                                .when(
+                                    !has_bookmarks && index + 1 == self.default_favorites.len(),
+                                    |row| row.relative().child(bookmark_drop_half(None, false, cx)),
+                                )
+                            }),
+                    )
+                    .children(bookmarks),
             )
             .child(
                 section(cx)
@@ -239,6 +260,29 @@ impl App {
                     .child(content),
             )
     }
+}
+
+// 在书签行内部提供落点，插入线不参与侧栏布局。
+fn bookmark_drop_half(before: Option<uuid::Uuid>, upper: bool, cx: &Context<App>) -> Stateful<Div> {
+    let color = cx.theme().primary;
+    div()
+        .id(if upper { "drop-above" } else { "drop-below" })
+        .absolute()
+        .left_0()
+        .right_0()
+        .when(upper, |zone| zone.top(px(-1.)).bottom(relative(0.5)))
+        .when(!upper, |zone| zone.top(relative(0.5)).bottom(px(-1.)))
+        .drag_over::<BookmarkDrag>(move |style, _, _, _| {
+            let style = if upper {
+                style.border_t_2()
+            } else {
+                style.border_b_2()
+            };
+            style.border_color(color)
+        })
+        .on_drop(cx.listener(move |this, drag: &BookmarkDrag, _, cx| {
+            this.drop_bookmark(drag, before, cx);
+        }))
 }
 
 fn sidebar_row(

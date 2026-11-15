@@ -4,6 +4,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
 use gpui_kit::{App, Hsla, Pixels, px, rgb};
 
+pub const APP_ID: &str = "io.github.kamiertop.ktfm";
+
 pub const WINDOW_WIDTH: Pixels = px(1100.);
 pub const WINDOW_HEIGHT: Pixels = px(700.);
 pub const MIN_WINDOW_WIDTH: Pixels = px(640.);
@@ -78,4 +80,17 @@ pub fn icon_color(icon: IconName, mode: ThemeMode) -> Hsla {
         _ => (0x3667a3, 0x8cbcf5),
     };
     rgb(if mode.is_dark() { dark } else { light }).into()
+}
+
+pub fn sync_menu_theme(cx: &mut App) {
+    use ely_core::theme::{Mode, Theme as ElyTheme};
+
+    let mode = if cx.theme().mode.is_dark() {
+        Mode::Dark
+    } else {
+        Mode::Light
+    };
+    if cx.global::<ElyTheme>().mode() != mode {
+        ElyTheme::set_mode_now(mode, cx);
+    }
 }

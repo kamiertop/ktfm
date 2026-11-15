@@ -27,7 +27,7 @@ pub(super) struct BrowserTab {
 }
 
 impl BrowserTab {
-    fn new(id: Uuid, location: Option<Location>) -> Self {
+    pub(super) fn new(id: Uuid, location: Option<Location>) -> Self {
         Self {
             id,
             history: location.into_iter().collect(),
@@ -219,7 +219,9 @@ impl App {
                 .collect(),
             active: Some(self.tabs[self.active_tab].id),
         };
-        if self.workspace_writable {
+        // 只有主窗口的标签页写入会话，独立窗口仍共用书签。
+        if self.persist_session && self.workspace_writable {
+            self.workspace.bookmarks = self.bookmarks.read(cx).clone();
             self.workspace_error = self
                 .workspace
                 .save()

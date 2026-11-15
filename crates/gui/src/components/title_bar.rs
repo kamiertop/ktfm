@@ -72,7 +72,7 @@ pub fn title_bar(
                 ))
                 .child(with_tooltip(
                     icon_button("settings", IconName::Settings, "设置").on_click(toggle_settings),
-                    "设置",
+                    "设置 (Ctrl+P)",
                 ))
                 .when(client, |bar| bar.child(window_controls(window, cx))),
         )

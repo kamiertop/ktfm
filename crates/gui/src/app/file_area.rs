@@ -1,15 +1,16 @@
 use std::ops::Range;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
+
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use settings::config::{tab::Location, view::ViewMode};
+use settings::config::view::ViewMode;
 use vfs::EntryKind;
 
 use super::App;
+use super::bookmarks::BookmarkDrag;
 use super::browser::DirectoryState;
 use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
@@ -139,6 +140,7 @@ impl App {
 
     pub(super) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         if self.view_mode != mode {
+            self.file_item_menu.clear();
             self.view_mode = mode;
             self.browser.scroll = UniformListScrollHandle::new();
             cx.notify();
@@ -189,10 +191,13 @@ impl App {
             .and_then(|paths| paths.get(index))
             .and_then(|path| path.parent())
             .map(|parent| parent.to_string_lossy().into_owned());
-        let entity = cx.entity().downgrade();
         let generation = self.browser.generation;
         let name = file.name.to_string_lossy().into_owned();
         let (icon, kind) = entry_appearance(file.kind);
+        let folder_drag = (file.kind == EntryKind::Directory)
+            .then(|| self.entry_target(index))
+            .flatten()
+            .map(|(path, _)| BookmarkDrag::Folder(path));
         let hover = cx.theme().list_hover;
         let muted = cx.theme().muted_foreground;
         Some(
@@ -212,7 +217,17 @@ impl App {
                         .flex_shrink_0()
                 })
                 .when(!grid, |entry| entry.h_10().w_full().min_w_0())
+                .when_some(folder_drag, |entry, folder| {
+                    entry.on_drag(folder, BookmarkDrag::preview)
+                })
                 .hover(|style| style.bg(hover))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event, window, cx| {
+                        this.open_file_item_menu(generation, index, event, cx);
+                        window.prevent_default();
+                    }),
+                )
                 .when(
                     matches!(
                         file.kind,
@@ -252,70 +267,6 @@ impl App {
                             .text_color(muted)
                             .child(kind),
                     )
-                })
-                .context_menu(move |menu, _, cx| {
-                    let Some(this) = entity.upgrade() else {
-                        return menu;
-                    };
-                    let this = this.read(cx);
-                    if this.browser.generation != generation {
-                        return menu;
-                    }
-                    let Some((path, kind)) = this.entry_target(index) else {
-                        return menu;
-                    };
-                    let mut menu = menu;
-                    if kind == EntryKind::Directory {
-                        let target = Location::directory(path.clone());
-                        let app = entity.clone();
-                        menu = menu.item(PopupMenuItem::new("在新标签页打开").on_click(
-                            move |_, window, cx| {
-                                let _ = app.update(cx, |this, cx| {
-                                    this.new_tab(Some(target.clone()), window, cx)
-                                });
-                            },
-                        ));
-                        if !this.is_default_favorite(&path) {
-                            let starred = this.workspace.stars.find(&path).is_some();
-                            let app = entity.clone();
-                            let target = path.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(if starred {
-                                    "取消收藏"
-                                } else {
-                                    "收藏文件夹"
-                                })
-                                .on_click(move |_, _, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.toggle_star(target.clone(), cx)
-                                    });
-                                }),
-                            );
-                        }
-                    }
-                    for tag in this.tags.items() {
-                        let id = tag.id;
-                        let label = format!("标签 · {}", tag.name);
-                        let app = entity.clone();
-                        let target = path.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked(tag.contains(&path))
-                                .on_click(move |_, _, cx| {
-                                    let _ = app.update(cx, |this, cx| {
-                                        this.toggle_tag_path(id, target.clone(), cx)
-                                    });
-                                }),
-                        );
-                    }
-                    let app = entity.clone();
-                    menu.item(PopupMenuItem::new("新建标签并添加").on_click(
-                        move |_, window, cx| {
-                            let _ = app.update(cx, |this, cx| {
-                                this.edit_tag(None, Some(path.clone()), window, cx)
-                            });
-                        },
-                    ))
                 }),
         )
     }
