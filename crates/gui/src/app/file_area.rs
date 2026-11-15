@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use gpui_kit::assets::IconName;
 
+use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -72,6 +73,12 @@ impl App {
             .child(self.path_breadcrumb(cx))
             .child(
                 div()
+                    .id("file-area-entries")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.browser.selected_entry.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -124,6 +131,56 @@ impl App {
             )
     }
 
+    fn path_to_copy(&self) -> Option<std::path::PathBuf> {
+        self.browser
+            .selected_entry
+            .and_then(|index| self.entry_target(index))
+            .map(|(path, _)| path)
+            .or_else(|| self.location().map(ToOwned::to_owned))
+    }
+
+    pub(super) fn copy_path_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let label = if self.browser.selected_entry.is_some() {
+            "复制选中文件路径"
+        } else {
+            "复制当前目录路径"
+        };
+        with_anchored_tooltip(
+            "copy-path",
+            icon_button("copy-full-path", IconName::Copy, label)
+                .small()
+                .disabled(self.path_to_copy().is_none())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(path) = this.path_to_copy() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            path.to_string_lossy().into_owned(),
+                        ));
+                    }
+                })),
+            label,
+        )
+    }
+
+    pub(super) fn hidden_files_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let show_hidden = self.browser.show_hidden;
+        let (icon, label) = if show_hidden {
+            (IconName::Eye, "隐藏隐藏文件")
+        } else {
+            (IconName::EyeOff, "显示隐藏文件")
+        };
+        with_anchored_tooltip(
+            "hidden-files",
+            icon_button("toggle-hidden-files", icon, label)
+                .small()
+                .selected(show_hidden)
+                .toggled(show_hidden)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_show_hidden_files(!this.browser.show_hidden, cx);
+                })),
+            label,
+        )
+    }
+
     pub(super) fn view_switch_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (mode, icon, label) = match self.view_mode {
             ViewMode::List => (ViewMode::Grid, IconName::LayoutGrid, "切换到网格视图"),
@@ -131,6 +188,7 @@ impl App {
         };
 
         with_anchored_tooltip(
+            "file-view-mode",
             icon_button("switch-file-view", icon, label)
                 .small()
                 .on_click(cx.listener(move |this, _, _, cx| this.set_view_mode(mode, cx))),
@@ -198,7 +256,9 @@ impl App {
             .then(|| self.entry_target(index))
             .flatten()
             .map(|(path, _)| BookmarkDrag::Folder(path));
+        let selected = self.browser.selected_entry == Some(index);
         let hover = cx.theme().list_hover;
+        let active = cx.theme().list_active;
         let muted = cx.theme().muted_foreground;
         Some(
             div()
@@ -220,7 +280,8 @@ impl App {
                 .when_some(folder_drag, |entry, folder| {
                     entry.on_drag(folder, BookmarkDrag::preview)
                 })
-                .hover(|style| style.bg(hover))
+                .when(selected, |entry| entry.bg(active))
+                .when(!selected, |entry| entry.hover(|style| style.bg(hover)))
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event, window, cx| {
@@ -228,21 +289,13 @@ impl App {
                         window.prevent_default();
                     }),
                 )
-                .when(
-                    matches!(
-                        file.kind,
-                        EntryKind::Directory | EntryKind::File | EntryKind::Symlink
-                    ),
-                    |entry| {
-                        entry.cursor_pointer().on_click(cx.listener(
-                            move |this, event: &ClickEvent, window, cx| {
-                                if this.browser.generation == generation {
-                                    this.activate_entry(index, event.click_count(), window, cx);
-                                }
-                            },
-                        ))
-                    },
-                )
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    if this.browser.generation == generation {
+                        this.activate_entry(index, event.click_count(), window, cx);
+                    }
+                }))
                 .child(
                     Icon::new(icon)
                         .size(if grid { GRID_ICON_SIZE } else { FILE_ICON_SIZE })

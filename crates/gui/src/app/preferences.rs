@@ -136,10 +136,7 @@ impl App {
 
         cx.bind_keys(unbind.into_iter().chain(bindings));
         self.set_view_mode(config.view.view_mode, cx);
-        if self.browser.show_hidden != config.view.show_hidden_files {
-            self.browser.show_hidden = config.view.show_hidden_files;
-            self.filter_directory(false, cx);
-        }
+        self.set_show_hidden_files(config.view.show_hidden_files, cx);
         self.config = config;
         cx.notify();
         Ok(())

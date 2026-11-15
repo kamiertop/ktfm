@@ -128,6 +128,8 @@ impl App {
                     .gap_0p5() // IconName::ChevronRight 的左侧间距
                     .children(segments),
             )
+            .child(self.copy_path_button(cx))
+            .child(self.hidden_files_button(cx))
             .child(self.view_switch_button(cx))
     }
 }

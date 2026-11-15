@@ -25,12 +25,17 @@ pub fn with_tooltip(
 }
 
 /// 将提示锚定到按钮下方，鼠标进入按钮的位置不会影响提示高度。
-pub fn with_anchored_tooltip(button: Button, label: &'static str) -> impl gpui_kit::IntoElement {
-    AnchoredTooltipButton { button, label }
+pub fn with_anchored_tooltip(
+    id: &'static str,
+    button: Button,
+    label: &'static str,
+) -> impl gpui_kit::IntoElement {
+    AnchoredTooltipButton { id, button, label }
 }
 
 #[derive(gpui_kit::IntoElement)]
 struct AnchoredTooltipButton {
+    id: &'static str,
     button: Button,
     label: &'static str,
 }
@@ -45,10 +50,11 @@ impl gpui_kit::RenderOnce for AnchoredTooltipButton {
 
         use gpui_kit::base::{ElementExt as _, Placement};
         use gpui_kit::base::{TooltipOverlay, TooltipRequest};
-        use gpui_kit::{Bounds, MouseButton, Pixels};
+        use gpui_kit::{Bounds, ElementId, MouseButton, Pixels};
 
-        let overlay =
-            window.use_keyed_state("view-switch-tooltip", cx, |_, _| TooltipOverlay::new());
+        let overlay = window.use_keyed_state((ElementId::from(self.id), "tooltip"), cx, |_, _| {
+            TooltipOverlay::new()
+        });
         let hover_overlay = overlay.clone();
         let press_overlay = overlay.clone();
         let bounds = Rc::new(Cell::new(Bounds::<Pixels>::default()));
@@ -56,7 +62,7 @@ impl gpui_kit::RenderOnce for AnchoredTooltipButton {
         let label = self.label;
 
         div()
-            .id("view-switch-tooltip-trigger")
+            .id((ElementId::from(self.id), "trigger"))
             .flex_shrink_0()
             .on_prepaint(move |bounds, _, _| anchor.set(bounds))
             .on_hover(move |hovered, window, cx| {

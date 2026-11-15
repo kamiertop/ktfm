@@ -43,6 +43,7 @@ pub(super) struct Browser {
     pub(super) query: String,
     pub(super) show_hidden: bool,
     pub(super) visible: Vec<usize>,
+    pub(super) selected_entry: Option<usize>,
     pub(super) scroll: UniformListScrollHandle,
     pub(super) open_error: Option<String>,
     pub(super) filtering: bool,
@@ -58,6 +59,7 @@ impl Browser {
             query: String::new(),
             show_hidden,
             visible: Vec::new(),
+            selected_entry: None,
             scroll: UniformListScrollHandle::new(),
             open_error: None,
             filtering: false,
@@ -83,6 +85,7 @@ impl App {
         browser.filter_task = None;
         browser.filtering = false;
         browser.visible = Vec::new();
+        browser.selected_entry = None;
         browser.open_error = None;
         browser.scroll = UniformListScrollHandle::new();
         let Some(source) = source else {
@@ -146,7 +149,15 @@ impl App {
         }
     }
 
-    pub(super) fn filter_directory(&mut self, debounce: bool, cx: &mut Context<Self>) {
+    pub(super) fn set_show_hidden_files(&mut self, show: bool, cx: &mut Context<Self>) {
+        if self.browser.show_hidden != show {
+            self.browser.show_hidden = show;
+            self.filter_directory(false, cx);
+            cx.notify();
+        }
+    }
+
+    fn filter_directory(&mut self, debounce: bool, cx: &mut Context<Self>) {
         let browser = &mut self.browser;
         let DirectoryState::Ready(directory) = &browser.state else {
             return;
@@ -171,6 +182,13 @@ impl App {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.browser.generation == generation {
+                    if this
+                        .browser
+                        .selected_entry
+                        .is_some_and(|index| !visible.contains(&index))
+                    {
+                        this.browser.selected_entry = None;
+                    }
                     this.browser.visible = visible;
                     this.browser.filtering = false;
                     this.browser.scroll = UniformListScrollHandle::new();
@@ -212,6 +230,10 @@ impl App {
                 self.navigate(path, window, cx);
             }
             return;
+        }
+        if self.browser.selected_entry != Some(index) {
+            self.browser.selected_entry = Some(index);
+            cx.notify();
         }
         if click_count != 2 || !matches!(kind, EntryKind::File | EntryKind::Symlink) {
             return;
