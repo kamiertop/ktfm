@@ -61,7 +61,7 @@ impl App {
             ));
         }
 
-        for tag in self.tags.items() {
+        for tag in self.tags(cx).items() {
             let id = tag.id;
             let app = owner.clone();
             let target = path.clone();

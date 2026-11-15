@@ -17,6 +17,10 @@ use crate::style::{APP_ID, WINDOW_RADIUS};
 
 actions!(browser, [OpenPreferences]);
 
+pub(super) struct ActivePreferences(pub AppConfig);
+
+impl Global for ActivePreferences {}
+
 const PREFERENCES_SIDEBAR_WIDTH: Pixels = px(176.);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,8 +71,9 @@ impl App {
             view_mode: self.view_mode,
             show_hidden_files: self.browser.show_hidden,
         };
-        let middle_click_tab = self.config.actions.middle_click_tab;
-        let shortcuts = self.config.shortcuts.clone();
+        let config = &cx.global::<ActivePreferences>().0;
+        let middle_click_tab = config.actions.middle_click_tab;
+        let shortcuts = config.shortcuts.clone();
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
             window_bounds: Some(WindowBounds::centered(size(px(820.), px(580.)), cx)),
@@ -122,7 +127,7 @@ impl App {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let bindings = shortcut_bindings(&shortcuts, cx)?;
-        let old = &self.config.shortcuts;
+        let old = &cx.global::<ActivePreferences>().0.shortcuts;
         let unbind = [
             key_binding(&old.new_tab, Unbind(NewTab.name().into()), cx)?,
             key_binding(&old.close_tab, Unbind(CloseTab.name().into()), cx)?,
@@ -137,7 +142,7 @@ impl App {
         cx.bind_keys(unbind.into_iter().chain(bindings));
         self.set_view_mode(config.view.view_mode, cx);
         self.set_show_hidden_files(config.view.show_hidden_files, cx);
-        self.config = config;
+        cx.set_global(ActivePreferences(config));
         cx.notify();
         Ok(())
     }

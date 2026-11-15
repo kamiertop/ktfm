@@ -110,9 +110,10 @@ impl App {
                 };
                 if matches!(command, Command::NewTab) {
                     self.new_tab(Some(Location::directory(path)), window, cx);
-                } else if let Err(error) =
-                    Self::open_window_at(cx, Some((path, self.bookmarks.clone())))
-                {
+                } else if let Err(error) = Self::open_window_at(
+                    cx,
+                    Some((path, self.bookmarks.clone(), self.tag_state.clone())),
+                ) {
                     self.workspace_error = Some(format!("无法打开新窗口：{error}"));
                     cx.notify();
                 }

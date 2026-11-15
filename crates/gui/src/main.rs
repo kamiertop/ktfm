@@ -35,7 +35,7 @@ fn main() {
             })
             .detach();
 
-            if let Err(error) = app::App::open_window_at(cx, None) {
+            if let Err(error) = app::App::open_main_window(cx) {
                 eprintln!("无法打开窗口：{error:#}");
                 cx.quit();
                 return;

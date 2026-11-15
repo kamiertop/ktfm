@@ -7,11 +7,47 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use hex_color::HexColor;
 use settings::config::tab::Location;
-use settings::tag::TagItem;
+use settings::tag::{Tag, TagItem};
+use settings::tag_store::TagStore;
 use uuid::Uuid;
 
 use super::App;
 use crate::components::icon_button;
+
+pub(super) struct TagState {
+    tags: Tag,
+    store: Option<TagStore>,
+    pub(super) load_error: Option<String>,
+}
+
+impl TagState {
+    pub(super) fn open() -> Self {
+        match TagStore::open() {
+            Ok((store, tags)) => Self {
+                tags,
+                store: Some(store),
+                load_error: None,
+            },
+            Err(error) => Self {
+                tags: Tag::default(),
+                store: None,
+                load_error: Some(format!("无法打开标签数据库：{error}")),
+            },
+        }
+    }
+
+    pub(super) fn loaded_tags(&self) -> Option<&Tag> {
+        self.store.as_ref().map(|_| &self.tags)
+    }
+}
+
+pub(super) enum TagChange {
+    Details,
+    Paths(Uuid),
+    Removed(Uuid),
+}
+
+impl EventEmitter<TagChange> for TagState {}
 
 pub(super) struct TagEditor {
     id: Option<Uuid>,
@@ -27,6 +63,37 @@ pub(super) fn tag_color(color: HexColor) -> Hsla {
 }
 
 impl App {
+    pub(super) fn tags<'a>(&self, cx: &'a gpui_kit::App) -> &'a Tag {
+        &self.tag_state.read(cx).tags
+    }
+
+    pub(super) fn sync_tag_change(
+        &mut self,
+        change: &TagChange,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match *change {
+            TagChange::Details => {}
+            TagChange::Paths(id) => {
+                if self.current_location() == Some(&Location::Tag { id }) {
+                    self.load_directory(cx);
+                }
+            }
+            TagChange::Removed(id) => {
+                if self
+                    .tag_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.id == Some(id))
+                {
+                    self.tag_editor = None;
+                }
+                self.forget_tag(id, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn edit_tag(
         &mut self,
         id: Option<Uuid>,
@@ -34,7 +101,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tag = id.and_then(|id| self.tags.get(id));
+        let tag = id.and_then(|id| self.tags(cx).get(id));
         let name = tag.map_or_else(String::new, |tag| tag.name.clone());
         let color = tag
             .and_then(|tag| tag.color)
@@ -89,76 +156,84 @@ impl App {
             return;
         };
         let note = (!note.is_empty()).then_some(note);
-        let Some(store) = self.tag_store.as_mut() else {
-            editor.error = Some("标签数据库不可用".into());
-            cx.notify();
-            return;
-        };
-
-        // 先提交数据库，再更新界面快照。失败时保留表单供用户重试。
-        let result = if let Some(id) = editor.id {
-            let Some(existing) = self.tags.get_mut(id) else {
-                editor.error = Some("标签已不存在".into());
-                cx.notify();
-                return;
+        let id = editor.id;
+        let path = editor.path.as_deref();
+        // 先提交数据库，再更新所有窗口共用的标签数据。
+        let result = self.tag_state.update(cx, |state, cx| {
+            let store = state
+                .store
+                .as_mut()
+                .ok_or_else(|| "标签数据库不可用".to_owned())?;
+            let result = if let Some(id) = id {
+                let existing = state
+                    .tags
+                    .get_mut(id)
+                    .ok_or_else(|| "标签已不存在".to_owned())?;
+                store
+                    .update(id, &name, color, note.as_deref())
+                    .map(|updated_at| existing.update(name, color, note, updated_at))
+            } else {
+                let mut tag = TagItem::new(name, color, note);
+                if let Some(path) = path {
+                    tag.set_path(path.to_owned(), true, tag.updated_at);
+                }
+                store.create(&tag).map(|()| state.tags.insert(tag))
             };
-            store
-                .update(id, &name, color, note.as_deref())
-                .map(|updated_at| existing.update(name, color, note, updated_at))
-        } else {
-            let mut tag = TagItem::new(name, color, note);
-            if let Some(path) = &editor.path {
-                tag.set_path(path.clone(), true, tag.updated_at);
-            }
-            store.create(&tag).map(|()| self.tags.insert(tag))
-        };
+            result.map_err(|error| format!("保存标签失败：{error}"))?;
+            cx.emit(TagChange::Details);
+            Ok::<_, String>(())
+        });
         match result {
             Ok(()) => {
                 self.tag_editor = None;
                 self.tag_error = None;
             }
-            Err(error) => editor.error = Some(format!("保存标签失败：{error}")),
+            Err(error) => editor.error = Some(error),
         }
         cx.notify();
     }
 
     pub(super) fn toggle_tag_path(&mut self, id: Uuid, path: PathBuf, cx: &mut Context<Self>) {
-        let (Some(store), Some(tag)) = (self.tag_store.as_mut(), self.tags.get_mut(id)) else {
-            return;
-        };
-        let present = !tag.contains(&path);
-        match store.set_path(id, &path, present) {
-            Ok(updated_at) => {
+        self.tag_error = self
+            .tag_state
+            .update(cx, |state, cx| {
+                let store = state
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| "标签数据库不可用".to_owned())?;
+                let tag = state
+                    .tags
+                    .get_mut(id)
+                    .ok_or_else(|| "标签已不存在".to_owned())?;
+                let present = !tag.contains(&path);
+                let updated_at = store
+                    .set_path(id, &path, present)
+                    .map_err(|error| format!("更新标签关联失败：{error}"))?;
                 tag.set_path(path, present, updated_at);
-                self.tag_error = None;
-                if self.current_location() == Some(&Location::Tag { id }) {
-                    self.load_directory(cx);
-                }
-            }
-            Err(error) => self.tag_error = Some(format!("更新标签关联失败：{error}")),
-        }
+                cx.emit(TagChange::Paths(id));
+                Ok::<_, String>(())
+            })
+            .err();
         cx.notify();
     }
 
-    pub(super) fn delete_tag(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.tag_store.as_mut() else {
-            return;
-        };
-        if let Err(error) = store.remove(id) {
-            self.tag_error = Some(format!("删除标签失败：{error}"));
-            cx.notify();
-            return;
-        }
-        self.tags.remove(id);
-        self.tag_error = None;
-        if self
-            .tag_editor
-            .as_ref()
-            .is_some_and(|editor| editor.id == Some(id))
-        {
-            self.tag_editor = None;
-        }
-        self.forget_tag(id, window, cx);
+    pub(super) fn delete_tag(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.tag_error = self
+            .tag_state
+            .update(cx, |state, cx| {
+                let store = state
+                    .store
+                    .as_mut()
+                    .ok_or_else(|| "标签数据库不可用".to_owned())?;
+                store
+                    .remove(id)
+                    .map_err(|error| format!("删除标签失败：{error}"))?;
+                state.tags.remove(id);
+                cx.emit(TagChange::Removed(id));
+                Ok::<_, String>(())
+            })
+            .err();
+        cx.notify();
     }
 
     pub(super) fn tag_form(

@@ -12,6 +12,7 @@ mod title_bar;
 mod view;
 mod volumes;
 mod window_resize;
+mod workspace;
 
 pub use preferences::OpenPreferences;
 pub use view::App;

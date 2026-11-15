@@ -43,7 +43,7 @@ impl App {
             })
             .collect();
         if let Some(Location::Tag { .. }) = self.current_location() {
-            let (name, icon) = self.location_appearance(self.current_location());
+            let (name, icon) = self.location_appearance(self.current_location(), cx);
             path.push((None, name, icon));
         }
         let theme = cx.theme();

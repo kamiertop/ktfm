@@ -12,6 +12,8 @@ use settings::tag::Tag;
 use uuid::Uuid;
 
 use super::App;
+use super::preferences::ActivePreferences;
+use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, truncated_text, with_tooltip};
 use crate::style::SIDEBAR_WIDTH;
 
@@ -86,11 +88,15 @@ impl App {
         }
     }
 
-    pub(super) fn location_appearance(&self, location: Option<&Location>) -> (String, IconName) {
+    pub(super) fn location_appearance(
+        &self,
+        location: Option<&Location>,
+        cx: &gpui_kit::App,
+    ) -> (String, IconName) {
         match location {
             Some(Location::Directory { path }) => self.path_appearance(&path.0),
             Some(Location::Tag { id }) => (
-                self.tags
+                self.tags(cx)
                     .get(*id)
                     .map_or_else(|| "已删除的标签".into(), |tag| tag.name.clone()),
                 IconName::Tag,
@@ -206,27 +212,24 @@ impl App {
     }
 
     pub(super) fn save_workspace(&mut self, cx: &mut Context<Self>) {
-        self.workspace.session = Session {
-            tabs: self
-                .tabs
-                .iter()
-                .filter_map(|tab| {
-                    Some(TabItem {
-                        id: tab.id,
-                        location: tab.location()?.clone(),
-                    })
-                })
-                .collect(),
-            active: Some(self.tabs[self.active_tab].id),
-        };
-        // 只有主窗口的标签页写入会话，独立窗口仍共用书签。
+        // 只有主窗口的标签页写入会话。
         if self.persist_session && self.workspace_writable {
-            self.workspace.bookmarks = self.bookmarks.read(cx).clone();
-            self.workspace_error = self
-                .workspace
-                .save()
-                .err()
-                .map(|error| format!("保存工作区失败：{error}"));
+            let session = Session {
+                tabs: self
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| {
+                        Some(TabItem {
+                            id: tab.id,
+                            location: tab.location()?.clone(),
+                        })
+                    })
+                    .collect(),
+                active: Some(self.tabs[self.active_tab].id),
+            };
+            cx.global::<WorkspaceWriter>()
+                .clone()
+                .save_session(session, cx);
         }
         cx.notify();
     }
@@ -240,7 +243,11 @@ impl App {
     }
 
     pub(super) fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let label: SharedString = format!("新建标签页 ({})", self.config.shortcuts.new_tab).into();
+        let label: SharedString = format!(
+            "新建标签页 ({})",
+            cx.global::<ActivePreferences>().0.shortcuts.new_tab
+        )
+        .into();
         with_tooltip(
             icon_button("new-tab", IconName::Plus, "新建标签页")
                 .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx))),
@@ -290,7 +297,7 @@ impl App {
                 divider,
             ))
             .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                let (name, icon) = self.location_appearance(tab.location());
+                let (name, icon) = self.location_appearance(tab.location(), cx);
                 let tooltip: SharedString = match tab.location() {
                     Some(Location::Directory { path }) => {
                         path.0.to_string_lossy().into_owned().into()
@@ -314,7 +321,13 @@ impl App {
                     .on_mouse_up(
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
-                            match this.config.actions.middle_click_tab.to_command() {
+                            match cx
+                                .global::<ActivePreferences>()
+                                .0
+                                .actions
+                                .middle_click_tab
+                                .to_command()
+                            {
                                 Some(AppCommand::CloseCurrentTab) => {
                                     this.close_tab(index, window, cx)
                                 }

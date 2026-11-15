@@ -7,14 +7,12 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use settings::config::{
-    bookmark::{Bookmark, BookmarkKind, Bookmarks},
-    workspace::Workspace,
-};
+use settings::config::bookmark::{Bookmark, BookmarkKind, Bookmarks};
 use uuid::Uuid;
 use vfs::EntryKind;
 
 use super::App;
+use super::workspace::WorkspaceWriter;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color};
 
 pub(super) enum BookmarkDrag {
@@ -147,20 +145,23 @@ impl App {
     ) -> bool {
         let mut bookmarks = self.bookmarks.read(cx).clone();
         change(&mut bookmarks);
-        let result = Workspace::load().and_then(|mut workspace| {
-            workspace.bookmarks = bookmarks.clone();
-            workspace.save()
-        });
-        self.workspace_error = result.err().map(|error| format!("保存书签失败：{error}"));
-        let saved = self.workspace_error.is_none();
-        if saved {
-            self.bookmarks.update(cx, |current, cx| {
-                *current = bookmarks;
+        let result = cx.global::<WorkspaceWriter>().save_bookmarks(bookmarks);
+        match result {
+            Ok(bookmarks) => {
+                self.bookmarks.update(cx, |current, cx| {
+                    *current = bookmarks;
+                    cx.notify();
+                });
+                self.workspace_error = None;
                 cx.notify();
-            });
+                true
+            }
+            Err(error) => {
+                self.workspace_error = Some(format!("保存书签失败：{error}"));
+                cx.notify();
+                false
+            }
         }
-        cx.notify();
-        saved
     }
 
     pub(super) fn toggle_bookmark(

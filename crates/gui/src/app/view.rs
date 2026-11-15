@@ -7,16 +7,15 @@ use gpui_kit::*;
 use settings::config::{
     AppConfig, bookmark::Bookmarks, tab::Location, view::ViewMode, workspace::Workspace,
 };
-use settings::tag::Tag;
-use settings::tag_store::TagStore;
 
 use super::bookmark_menu::BookmarkMenu;
 use super::bookmarks::BookmarkRename;
 use super::browser::Browser;
-use super::preferences::{OpenPreferences, Preferences, shortcut_bindings};
+use super::preferences::{ActivePreferences, OpenPreferences, Preferences, shortcut_bindings};
 use super::tabs::{BrowserTab, CloseTab, NewTab, restore_tabs};
-use super::tags::TagEditor;
+use super::tags::{TagEditor, TagState};
 use super::volumes::StorageDevices;
+use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
 use crate::components::ItemContextMenu;
 use crate::model::{SidebarItem, default_favorites, home_directory};
@@ -29,14 +28,12 @@ pub struct App {
     focus: FocusHandle,
     pub(super) tabs: Vec<BrowserTab>,
     pub(super) active_tab: usize,
-    pub(super) workspace: Workspace,
     pub(super) bookmarks: Entity<Bookmarks>,
     pub(super) bookmark_menu: Option<BookmarkMenu>,
     pub(super) bookmark_rename: Option<BookmarkRename>,
     pub(super) bookmark_properties: Option<uuid::Uuid>,
     pub(super) persist_session: bool,
-    pub(super) tags: Tag,
-    pub(super) tag_store: Option<TagStore>,
+    pub(super) tag_state: Entity<TagState>,
     pub(super) tag_error: Option<String>,
     pub(super) workspace_writable: bool,
     pub(super) workspace_error: Option<String>,
@@ -47,14 +44,24 @@ pub struct App {
     pub(super) browser: Browser,
     pub(super) file_item_menu: ItemContextMenu,
     pub(super) view_mode: ViewMode,
-    pub(super) config: AppConfig,
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
 
 impl App {
-    pub fn open_window_at(
+    pub fn open_main_window(cx: &mut gpui_kit::App) -> anyhow::Result<WindowHandle<Self>> {
+        let writer = WorkspaceWriter::default();
+        cx.set_global(writer.clone());
+        cx.on_app_quit(move |_| {
+            writer.flush();
+            std::future::ready(())
+        })
+        .detach();
+        Self::open_window_at(cx, None)
+    }
+
+    pub(super) fn open_window_at(
         cx: &mut gpui_kit::App,
-        target: Option<(PathBuf, Entity<Bookmarks>)>,
+        target: Option<(PathBuf, Entity<Bookmarks>, Entity<TagState>)>,
     ) -> anyhow::Result<WindowHandle<Self>> {
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
@@ -74,17 +81,17 @@ impl App {
 
     fn new(
         window: &mut Window,
-        target: Option<(PathBuf, Entity<Bookmarks>)>,
+        target: Option<(PathBuf, Entity<Bookmarks>, Entity<TagState>)>,
         cx: &mut Context<Self>,
     ) -> Self {
         let home = home_directory();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索当前页"));
-        let mut config = AppConfig::load_from_file().unwrap_or_else(|error| {
-            eprintln!("无法加载配置：{error}");
-            AppConfig::default()
-        });
         let persist_session = target.is_none();
         if persist_session {
+            let mut config = AppConfig::load_from_file().unwrap_or_else(|error| {
+                eprintln!("无法加载配置：{error}");
+                AppConfig::default()
+            });
             match shortcut_bindings(&config.shortcuts, cx) {
                 Ok(bindings) => cx.bind_keys(bindings),
                 Err(error) => {
@@ -96,51 +103,48 @@ impl App {
                     ]);
                 }
             }
+            cx.set_global(ActivePreferences(config));
         }
-        let (mut workspace, workspace_error) = match Workspace::load() {
-            Ok(workspace) => (workspace, None),
-            Err(error) => (
-                Workspace::default(),
-                Some(format!("无法加载工作区：{error}")),
-            ),
-        };
-        let (tag_store, tags, tag_error) = match TagStore::open() {
-            Ok((store, tags)) => (Some(store), tags, None),
-            Err(error) => (
-                None,
-                Tag::default(),
-                Some(format!("无法打开标签数据库：{error}")),
-            ),
-        };
-        let (tabs, active_tab, bookmarks) = if let Some((path, bookmarks)) = target {
-            (
-                vec![BrowserTab::new(
-                    uuid::Uuid::new_v4(),
-                    Some(Location::directory(path)),
-                )],
-                0,
-                bookmarks,
-            )
-        } else {
-            let (tabs, active_tab) =
-                restore_tabs(&workspace, tag_store.as_ref().map(|_| &tags), home.clone());
-            let bookmarks = cx.new(|_| std::mem::take(&mut workspace.bookmarks));
-            (tabs, active_tab, bookmarks)
-        };
+        let (mut workspace, workspace_error) =
+            match persist_session.then(Workspace::load).transpose() {
+                Ok(workspace) => (workspace.unwrap_or_default(), None),
+                Err(error) => (
+                    Workspace::default(),
+                    Some(format!("无法加载工作区：{error}")),
+                ),
+            };
+        let (tabs, active_tab, bookmarks, tag_state) =
+            if let Some((path, bookmarks, tag_state)) = target {
+                (
+                    vec![BrowserTab::new(
+                        uuid::Uuid::new_v4(),
+                        Some(Location::directory(path)),
+                    )],
+                    0,
+                    bookmarks,
+                    tag_state,
+                )
+            } else {
+                let tag_state = cx.new(|_| TagState::open());
+                let (tabs, active_tab) =
+                    restore_tabs(&workspace, tag_state.read(cx).loaded_tags(), home.clone());
+                let bookmarks = cx.new(|_| std::mem::take(&mut workspace.bookmarks));
+                (tabs, active_tab, bookmarks, tag_state)
+            };
+        let tag_error = tag_state.read(cx).load_error.clone();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let view = &cx.global::<ActivePreferences>().0.view;
         let mut app = Self {
             focus,
             tabs,
             active_tab,
-            workspace,
             bookmarks,
             bookmark_menu: None,
             bookmark_rename: None,
             bookmark_properties: None,
             persist_session,
-            tags,
-            tag_store,
+            tag_state,
             tag_error,
             workspace_writable: workspace_error.is_none(),
             workspace_error,
@@ -148,10 +152,9 @@ impl App {
             storage: StorageDevices::default(),
             default_favorites: default_favorites(home),
             search,
-            browser: Browser::new(config.view.show_hidden_files),
+            browser: Browser::new(view.show_hidden_files),
             file_item_menu: ItemContextMenu::default(),
-            view_mode: config.view.view_mode,
-            config,
+            view_mode: view.view_mode,
             preferences: None,
         };
         cx.observe(&app.search, |this, search, cx| {
@@ -159,7 +162,13 @@ impl App {
             this.search_directory(query, cx);
         })
         .detach();
+        cx.observe_global::<ActivePreferences>(|_, cx| cx.notify())
+            .detach();
         cx.observe(&app.bookmarks, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(&app.tag_state, window, |this, _, event, window, cx| {
+            this.sync_tag_change(event, window, cx);
+        })
+        .detach();
         app.watch_volumes(cx);
         app.load_directory(cx);
         app

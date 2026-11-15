@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
 
@@ -13,6 +14,7 @@ use vfs::EntryKind;
 use super::App;
 use super::bookmarks::BookmarkDrag;
 use super::browser::DirectoryState;
+use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::{
@@ -122,16 +124,18 @@ impl App {
                     .text_sm()
                     .text_color(muted)
                     .child(
-                        self.tag_error
+                        self.browser
+                            .action_error
                             .clone()
                             .or_else(|| self.workspace_error.clone())
-                            .or_else(|| self.browser.open_error.clone())
+                            .or_else(|| self.tag_error.clone())
+                            .or_else(|| cx.global::<WorkspaceWriter>().session_error())
                             .unwrap_or(status),
                     ),
             )
     }
 
-    fn path_to_copy(&self) -> Option<std::path::PathBuf> {
+    fn path_to_copy(&self) -> Option<PathBuf> {
         self.browser
             .selected_entry
             .and_then(|index| self.entry_target(index))
@@ -149,13 +153,19 @@ impl App {
             "copy-path",
             icon_button("copy-full-path", IconName::Copy, label)
                 .small()
-                .disabled(self.path_to_copy().is_none())
+                .disabled(self.browser.selected_entry.is_none() && self.location().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(path) = this.path_to_copy() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            path.to_string_lossy().into_owned(),
-                        ));
+                    let Some(path) = this.path_to_copy() else {
+                        return;
+                    };
+                    if let Some(text) = path.to_str() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                        this.browser.action_error = None;
+                    } else {
+                        this.browser.action_error =
+                            Some("无法复制路径：文件名不是有效的 UTF-8 文本".into());
                     }
+                    cx.notify();
                 })),
             label,
         )

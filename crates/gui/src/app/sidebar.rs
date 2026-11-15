@@ -89,7 +89,7 @@ impl App {
                     .child(bookmark_drop_half(next_id, false, cx))
                 });
 
-        let tags = self.tags.items().iter().map(|tag| {
+        let tags = self.tags(cx).items().iter().map(|tag| {
             let id = tag.id;
             let location = Location::Tag { id };
             let selected = self.current_location() == Some(&location);
@@ -123,11 +123,9 @@ impl App {
                             edit.update(cx, |this, cx| this.edit_tag(Some(id), None, window, cx));
                     }),
                 )
-                .item(
-                    PopupMenuItem::new("删除标签").on_click(move |_, window, cx| {
-                        let _ = delete.update(cx, |this, cx| this.delete_tag(id, window, cx));
-                    }),
-                )
+                .item(PopupMenuItem::new("删除标签").on_click(move |_, _, cx| {
+                    let _ = delete.update(cx, |this, cx| this.delete_tag(id, cx));
+                }))
             })
         });
 

@@ -121,9 +121,10 @@ impl AppConfig {
         #[cfg(unix)]
         if result.is_ok()
             && let Some(parent) = path.parent()
-            && let Ok(dir) = fs::File::open(parent)
+            && let Err(error) = fs::File::open(parent).and_then(|dir| dir.sync_all())
         {
-            let _ = dir.sync_all();
+            // 文件已经替换，目录同步失败只能作为持久性警告报告。
+            eprintln!("配置已写入，但无法同步目录 {}：{error}", parent.display());
         }
 
         result
