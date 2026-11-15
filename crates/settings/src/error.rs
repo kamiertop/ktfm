@@ -20,6 +20,9 @@ pub enum Error {
     #[error("IO 错误: {0}")]
     Io(#[from] io::Error),
 
+    #[error("快捷键配置无效：{0}")]
+    InvalidShortcuts(String),
+
     #[error("配置解析失败: {0}")]
     ConfigParse(#[from] toml::de::Error),
 

@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::workspace::SavedPath;
 
 /// 侧边书签栏，经常访问的目录
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bookmark {
     pub id: Uuid,
     pub path: SavedPath,
@@ -26,7 +26,7 @@ pub enum BookmarkKind {
     File,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Bookmarks {
     items: Vec<Bookmark>,

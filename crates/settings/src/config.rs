@@ -73,9 +73,27 @@ impl AppConfig {
         })
     }
 
+    /// 在跨进程锁内合并并保存偏好设置。
+    pub fn update_file(change: impl FnOnce(&mut Self) -> Result<()>) -> Result<Self> {
+        let dirs = ProjectDirs::from("", "", APP_NAME).ok_or(Error::NoConfigDir)?;
+        Self::update_in(dirs.config_dir(), change)
+    }
+
+    fn update_in(dir: &Path, change: impl FnOnce(&mut Self) -> Result<()>) -> Result<Self> {
+        fs::create_dir_all(dir)?;
+        let _lock = crate::file_lock::acquire(&dir.join("config.lock"))?;
+        let mut config = Self::load_from(dir)?;
+        change(&mut config)?;
+        config.save_to(dir)?;
+        Ok(config)
+    }
+
     pub fn save_to_file(&self) -> Result<()> {
         let project_dirs = ProjectDirs::from("", "", APP_NAME).ok_or(Error::NoConfigDir)?;
-        self.save_to(project_dirs.config_dir())
+        let dir = project_dirs.config_dir();
+        fs::create_dir_all(dir)?;
+        let _lock = crate::file_lock::acquire(&dir.join("config.lock"))?;
+        self.save_to(dir)
     }
 
     /// 保存配置到指定目录

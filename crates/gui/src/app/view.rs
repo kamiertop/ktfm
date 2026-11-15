@@ -11,10 +11,11 @@ use settings::config::{
 use super::bookmark_menu::BookmarkMenu;
 use super::bookmarks::BookmarkRename;
 use super::browser::Browser;
+use super::io_queue::IoQueue;
 use super::preferences::{ActivePreferences, OpenPreferences, Preferences, shortcut_bindings};
 use super::tabs::{BrowserTab, CloseTab, NewTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
-use super::volumes::StorageDevices;
+use super::volumes::{SharedStorage, StorageDevices};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
 use crate::components::ItemContextMenu;
@@ -22,12 +23,14 @@ use crate::model::{SidebarItem, default_favorites, home_directory};
 use crate::style::{
     APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_RADIUS, WINDOW_WIDTH,
 };
+use settings::config::general::StartupBehavior;
 
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
     focus: FocusHandle,
     pub(super) tabs: Vec<BrowserTab>,
     pub(super) active_tab: usize,
+    pub(super) navigation_revision: u64,
     pub(super) bookmarks: Entity<Bookmarks>,
     pub(super) bookmark_menu: Option<BookmarkMenu>,
     pub(super) bookmark_rename: Option<BookmarkRename>,
@@ -38,7 +41,7 @@ pub struct App {
     pub(super) workspace_writable: bool,
     pub(super) workspace_error: Option<String>,
     pub(super) tag_editor: Option<TagEditor>,
-    pub(super) storage: StorageDevices,
+    pub(super) storage: Entity<StorageDevices>,
     pub(super) default_favorites: Vec<SidebarItem>,
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
@@ -47,21 +50,44 @@ pub struct App {
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
 
+struct SharedTags(Entity<TagState>);
+
+impl Global for SharedTags {}
+
 impl App {
-    pub fn open_main_window(cx: &mut gpui_kit::App) -> anyhow::Result<WindowHandle<Self>> {
+    pub fn open_main_window(cx: &mut gpui_kit::App) {
         let writer = WorkspaceWriter::default();
         cx.set_global(writer.clone());
-        cx.on_app_quit(move |_| {
+        match IoQueue::new() {
+            Ok(io) => cx.set_global(io),
+            Err(error) => {
+                eprintln!("无法启动存储线程：{error}");
+                cx.quit();
+                return;
+            }
+        }
+        cx.on_app_quit(move |cx| {
+            cx.global_mut::<IoQueue>().finish();
             writer.flush();
             std::future::ready(())
         })
         .detach();
-        Self::open_window_at(cx, None)
+
+        SharedStorage::install(cx);
+        let tags = cx.new(|_| TagState::loading());
+        cx.set_global(SharedTags(tags.clone()));
+        if let Err(error) = Self::open_window_at(cx, None) {
+            eprintln!("无法打开窗口：{error:#}");
+            cx.quit();
+            return;
+        }
+        TagState::load_in_background(&tags, cx);
+        cx.activate(true);
     }
 
     pub(super) fn open_window_at(
         cx: &mut gpui_kit::App,
-        target: Option<(PathBuf, Entity<Bookmarks>, Entity<TagState>)>,
+        target: Option<(PathBuf, Entity<Bookmarks>)>,
     ) -> anyhow::Result<WindowHandle<Self>> {
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
@@ -81,7 +107,7 @@ impl App {
 
     fn new(
         window: &mut Window,
-        target: Option<(PathBuf, Entity<Bookmarks>, Entity<TagState>)>,
+        target: Option<(PathBuf, Entity<Bookmarks>)>,
         cx: &mut Context<Self>,
     ) -> Self {
         let home = home_directory();
@@ -113,25 +139,45 @@ impl App {
                     Some(format!("无法加载工作区：{error}")),
                 ),
             };
-        let (tabs, active_tab, bookmarks, tag_state) =
-            if let Some((path, bookmarks, tag_state)) = target {
-                (
-                    vec![BrowserTab::new(
-                        uuid::Uuid::new_v4(),
-                        Some(Location::directory(path)),
-                    )],
-                    0,
-                    bookmarks,
-                    tag_state,
-                )
-            } else {
-                let tag_state = cx.new(|_| TagState::open());
-                let (tabs, active_tab) =
-                    restore_tabs(&workspace, tag_state.read(cx).loaded_tags(), home.clone());
-                let bookmarks = cx.new(|_| std::mem::take(&mut workspace.bookmarks));
-                (tabs, active_tab, bookmarks, tag_state)
-            };
-        let tag_error = tag_state.read(cx).load_error.clone();
+        let tag_state = cx.global::<SharedTags>().0.clone();
+        let (tabs, active_tab, bookmarks) = if let Some((path, bookmarks)) = target {
+            (
+                vec![BrowserTab::new(
+                    uuid::Uuid::new_v4(),
+                    Some(Location::directory(path)),
+                )],
+                0,
+                bookmarks,
+            )
+        } else {
+            let (tabs, active_tab) =
+                match &cx.global::<ActivePreferences>().0.general.startup_behavior {
+                    StartupBehavior::RestoreLastDir => {
+                        restore_tabs(&workspace, tag_state.read(cx).loaded_tags(), home.clone())
+                    }
+                    behavior => {
+                        let path = match behavior {
+                            StartupBehavior::OpenSpecifiedDir(path) if path.is_absolute() => {
+                                Some(path.clone())
+                            }
+                            StartupBehavior::OpenSpecifiedDir(path) => {
+                                home.as_ref().map(|home| home.join(path))
+                            }
+                            _ => home.clone(),
+                        };
+                        (
+                            vec![BrowserTab::new(
+                                uuid::Uuid::new_v4(),
+                                path.map(Location::directory),
+                            )],
+                            0,
+                        )
+                    }
+                };
+            let bookmarks = cx.new(|_| std::mem::take(&mut workspace.bookmarks));
+            (tabs, active_tab, bookmarks)
+        };
+
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let view = &cx.global::<ActivePreferences>().0.view;
@@ -139,17 +185,18 @@ impl App {
             focus,
             tabs,
             active_tab,
+            navigation_revision: 0,
             bookmarks,
             bookmark_menu: None,
             bookmark_rename: None,
             bookmark_properties: None,
             persist_session,
             tag_state,
-            tag_error,
+            tag_error: None,
             workspace_writable: workspace_error.is_none(),
             workspace_error,
             tag_editor: None,
-            storage: StorageDevices::default(),
+            storage: cx.global::<SharedStorage>().0.clone(),
             default_favorites: default_favorites(home),
             search,
             browser: Browser::new(view.show_hidden_files),
@@ -165,11 +212,16 @@ impl App {
         cx.observe_global::<ActivePreferences>(|_, cx| cx.notify())
             .detach();
         cx.observe(&app.bookmarks, |_, _, cx| cx.notify()).detach();
+        if persist_session {
+            cx.global::<WorkspaceWriter>()
+                .clone()
+                .watch_bookmarks(&app.bookmarks, cx);
+        }
         cx.subscribe_in(&app.tag_state, window, |this, _, event, window, cx| {
             this.sync_tag_change(event, window, cx);
         })
         .detach();
-        app.watch_volumes(cx);
+        cx.observe(&app.storage, |_, _, cx| cx.notify()).detach();
         app.load_directory(cx);
         app
     }

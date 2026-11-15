@@ -4,6 +4,7 @@ mod breadcrumb;
 mod browser;
 mod file_area;
 mod file_item_actions;
+mod io_queue;
 mod preferences;
 mod sidebar;
 mod tabs;

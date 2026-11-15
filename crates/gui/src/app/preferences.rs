@@ -1,4 +1,5 @@
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -10,6 +11,7 @@ use settings::config::{
 };
 
 use super::App;
+use super::io_queue::IoQueue;
 use super::tabs::{CloseTab, NewTab};
 use super::window_resize;
 use crate::components::preferences_title_bar;
@@ -44,9 +46,38 @@ impl Page {
     }
 }
 
+#[derive(Clone)]
+struct PreferenceValues {
+    shortcuts: ShortcutConfig,
+    view: ViewConfig,
+    middle_click_tab: TabMiddleClickAction,
+}
+
+impl PreferenceValues {
+    fn merge_into(self, baseline: Self, config: &mut AppConfig) {
+        if self.shortcuts.new_tab != baseline.shortcuts.new_tab {
+            config.shortcuts.new_tab = self.shortcuts.new_tab;
+        }
+        if self.shortcuts.close_tab != baseline.shortcuts.close_tab {
+            config.shortcuts.close_tab = self.shortcuts.close_tab;
+        }
+        if self.view.view_mode != baseline.view.view_mode {
+            config.view.view_mode = self.view.view_mode;
+        }
+        if self.view.show_hidden_files != baseline.view.show_hidden_files {
+            config.view.show_hidden_files = self.view.show_hidden_files;
+        }
+        if self.middle_click_tab != baseline.middle_click_tab {
+            config.actions.middle_click_tab = self.middle_click_tab;
+        }
+    }
+}
+
 /// 设置窗口持有自己的草稿，只有保存成功才更新文件管理器。
 pub(super) struct Preferences {
     owner: WeakEntity<App>,
+    baseline: PreferenceValues,
+    saving: bool,
     focus: FocusHandle,
     page: Page,
     view: ViewConfig,
@@ -67,13 +98,15 @@ impl App {
         }
 
         let owner = cx.entity();
-        let view = ViewConfig {
-            view_mode: self.view_mode,
-            show_hidden_files: self.browser.show_hidden,
-        };
         let config = &cx.global::<ActivePreferences>().0;
+        let view = config.view.clone();
         let middle_click_tab = config.actions.middle_click_tab;
         let shortcuts = config.shortcuts.clone();
+        let baseline = PreferenceValues {
+            view: view.clone(),
+            middle_click_tab,
+            shortcuts: shortcuts.clone(),
+        };
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
             window_bounds: Some(WindowBounds::centered(size(px(820.), px(580.)), cx)),
@@ -98,6 +131,8 @@ impl App {
                 window.focus(&focus, cx);
                 Preferences {
                     owner: owner.downgrade(),
+                    baseline,
+                    saving: false,
                     focus,
                     page: Page::View,
                     view,
@@ -118,53 +153,77 @@ impl App {
             }
         };
     }
+}
 
-    fn apply_preferences(
-        &mut self,
-        shortcuts: ShortcutConfig,
-        view: ViewConfig,
-        middle_click_tab: TabMiddleClickAction,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
-        let bindings = shortcut_bindings(&shortcuts, cx)?;
-        let old = &cx.global::<ActivePreferences>().0.shortcuts;
-        let unbind = [
-            key_binding(&old.new_tab, Unbind(NewTab.name().into()), cx)?,
-            key_binding(&old.close_tab, Unbind(CloseTab.name().into()), cx)?,
-        ];
-        // 只覆盖本页管理的字段，保留配置文件中其余选项。
-        let mut config = AppConfig::load_from_file().map_err(|error| error.to_string())?;
-        config.shortcuts = shortcuts;
-        config.view = view;
-        config.actions.middle_click_tab = middle_click_tab;
-        config.save_to_file().map_err(|error| error.to_string())?;
-
-        cx.bind_keys(unbind.into_iter().chain(bindings));
-        self.set_view_mode(config.view.view_mode, cx);
-        self.set_show_hidden_files(config.view.show_hidden_files, cx);
-        cx.set_global(ActivePreferences(config));
-        cx.notify();
-        Ok(())
-    }
+fn install_preferences(config: AppConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
+    let bindings = shortcut_bindings(&config.shortcuts, cx)?;
+    let old = &cx.global::<ActivePreferences>().0.shortcuts;
+    let unbind = [
+        key_binding(&old.new_tab, Unbind(NewTab.name().into()), cx)?,
+        key_binding(&old.close_tab, Unbind(CloseTab.name().into()), cx)?,
+    ];
+    cx.bind_keys(unbind.into_iter().chain(bindings));
+    cx.set_global(ActivePreferences(config));
+    Ok(())
 }
 
 impl Preferences {
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let shortcuts = ShortcutConfig {
-            new_tab: self.new_tab.read(cx).value().trim().to_ascii_lowercase(),
-            close_tab: self.close_tab.read(cx).value().trim().to_ascii_lowercase(),
-        };
-        let result = self.owner.update(cx, |owner, cx| {
-            owner.apply_preferences(shortcuts, self.view.clone(), self.middle_click_tab, cx)
-        });
-        match result {
-            Ok(Ok(())) => window.remove_window(),
-            Ok(Err(error)) => {
-                self.error = Some(error);
-                cx.notify();
-            }
-            Err(_) => window.remove_window(),
+        if self.saving {
+            return;
         }
+        let draft = PreferenceValues {
+            shortcuts: ShortcutConfig {
+                new_tab: self.new_tab.read(cx).value().trim().to_ascii_lowercase(),
+                close_tab: self.close_tab.read(cx).value().trim().to_ascii_lowercase(),
+            },
+            view: self.view.clone(),
+            middle_click_tab: self.middle_click_tab,
+        };
+        let baseline = self.baseline.clone();
+        let handle = window.window_handle().downcast::<Self>();
+        let owner = self.owner.clone();
+        let update_mode = draft.view.view_mode != baseline.view.view_mode;
+        let update_hidden = draft.view.show_hidden_files != baseline.view.show_hidden_files;
+        self.saving = true;
+        self.error = None;
+        IoQueue::submit(
+            cx,
+            move || {
+                AppConfig::update_file(|config| {
+                    draft.merge_into(baseline, config);
+                    validate_shortcuts(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)
+                })
+            },
+            move |result, cx| {
+                let result = result
+                    .map_err(|error| error.to_string())
+                    .and_then(|config| {
+                        let view = config.view.clone();
+                        install_preferences(config, cx)?;
+                        let _ = owner.update(cx, |owner, cx| {
+                            if update_mode {
+                                owner.set_view_mode(view.view_mode, cx);
+                            }
+                            if update_hidden {
+                                owner.set_show_hidden_files(view.show_hidden_files, cx);
+                            }
+                        });
+                        Ok(())
+                    });
+                if let Some(handle) = handle {
+                    let _ = handle.update(cx, |this, window, cx| match result {
+                        Ok(()) => window.remove_window(),
+                        Err(error) => {
+                            this.saving = false;
+                            this.error = Some(error);
+                            cx.notify();
+                        }
+                    });
+                }
+            },
+        );
+        cx.notify();
     }
 
     fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -273,11 +332,15 @@ impl Preferences {
             .child(div().font_semibold().child("标签页"))
             .child(preference_row(
                 "新建标签页",
-                div().w(px(176.)).child(Input::new(&self.new_tab)),
+                div()
+                    .w(px(176.))
+                    .child(Input::new(&self.new_tab).disabled(self.saving)),
             ))
             .child(preference_row(
                 "关闭标签页",
-                div().w(px(176.)).child(Input::new(&self.close_tab)),
+                div()
+                    .w(px(176.))
+                    .child(Input::new(&self.close_tab).disabled(self.saving)),
             ))
             .child(
                 div()
@@ -402,6 +465,7 @@ impl Render for Preferences {
                                             .child(
                                                 Button::new("save-preferences")
                                                     .primary()
+                                                    .disabled(self.saving)
                                                     .label("保存")
                                                     .on_click(cx.listener(
                                                         |this, _, window, cx| this.save(window, cx),
@@ -432,6 +496,14 @@ pub(super) fn shortcut_bindings(
     shortcuts: &ShortcutConfig,
     cx: &gpui_kit::App,
 ) -> Result<[KeyBinding; 2], String> {
+    validate_shortcuts(shortcuts)?;
+    Ok([
+        key_binding(&shortcuts.new_tab, NewTab, cx)?,
+        key_binding(&shortcuts.close_tab, CloseTab, cx)?,
+    ])
+}
+
+fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
     let parse = |value: &str, label: &str| {
         let key =
             Keystroke::parse(value).map_err(|error| format!("{label}的快捷键无效：{error}"))?;
@@ -452,10 +524,7 @@ pub(super) fn shortcut_bindings(
     if new == close {
         return Err("两个操作不能使用相同的快捷键".into());
     }
-    Ok([
-        key_binding(&shortcuts.new_tab, NewTab, cx)?,
-        key_binding(&shortcuts.close_tab, CloseTab, cx)?,
-    ])
+    Ok(())
 }
 
 fn key_binding(value: &str, action: impl Action, cx: &gpui_kit::App) -> Result<KeyBinding, String> {
@@ -470,4 +539,29 @@ fn key_binding(value: &str, action: impl Action, cx: &gpui_kit::App) -> Result<K
         cx.keyboard_mapper().as_ref(),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, PreferenceValues, ShortcutConfig, ViewConfig, ViewMode};
+
+    #[test]
+    fn preference_draft_does_not_overwrite_unedited_fields() {
+        let baseline = PreferenceValues {
+            shortcuts: ShortcutConfig::default(),
+            view: ViewConfig::default(),
+            middle_click_tab: AppConfig::default().actions.middle_click_tab,
+        };
+        let mut draft = baseline.clone();
+        draft.view.show_hidden_files = true;
+        let mut latest = AppConfig::default();
+        latest.shortcuts.new_tab = "ctrl-shift-t".to_owned();
+        latest.view.view_mode = ViewMode::Grid;
+
+        draft.merge_into(baseline, &mut latest);
+
+        assert_eq!(latest.shortcuts.new_tab, "ctrl-shift-t");
+        assert_eq!(latest.view.view_mode, ViewMode::Grid);
+        assert!(latest.view.show_hidden_files);
+    }
 }

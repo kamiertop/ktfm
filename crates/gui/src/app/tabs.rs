@@ -181,15 +181,46 @@ impl App {
     }
 
     pub(super) fn forget_tag(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let location = Location::Tag { id };
-        let was_active = self.current_location() == Some(&location);
+        self.forget_tab_locations(|location| *location == Location::Tag { id }, window, cx);
+    }
+
+    pub(super) fn forget_missing_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = self.tag_state.clone();
+        let Some(tags) = state.read(cx).loaded_tags() else {
+            return;
+        };
+        let missing = self
+            .tabs
+            .iter()
+            .flat_map(|tab| &tab.history)
+            .filter_map(|location| match location {
+                Location::Tag { id } if tags.get(*id).is_none() => Some(*id),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if !missing.is_empty() {
+            self.forget_tab_locations(
+                |location| matches!(location, Location::Tag { id } if missing.contains(id)),
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn forget_tab_locations(
+        &mut self,
+        removed: impl Fn(&Location) -> bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_active = self.current_location().is_some_and(&removed);
         let home = self.home().map(|path| Location::directory(path.to_owned()));
         for tab in &mut self.tabs {
             let before = tab.history[..tab.index]
                 .iter()
-                .filter(|item| **item != location)
+                .filter(|item| !removed(item))
                 .count();
-            tab.history.retain(|item| *item != location);
+            tab.history.retain(|item| !removed(item));
             if tab.history.is_empty() {
                 tab.history.extend(home.clone());
             }
@@ -203,6 +234,7 @@ impl App {
     }
 
     fn location_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigation_revision += 1;
         self.browser.query.clear();
         self.search.update(cx, |search, cx| {
             search.set_value("", window, cx);

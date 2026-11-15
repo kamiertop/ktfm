@@ -47,7 +47,7 @@ pub(super) struct Browser {
     pub(super) scroll: UniformListScrollHandle,
     pub(super) action_error: Option<String>,
     pub(super) filtering: bool,
-    pub(super) generation: u64,
+    pub(super) snapshot_revision: u64,
     read_task: Option<ReadTask>,
     directory_watch: Option<Task<()>>,
     refresh_pending: bool,
@@ -65,7 +65,7 @@ impl Browser {
             scroll: UniformListScrollHandle::new(),
             action_error: None,
             filtering: false,
-            generation: 0,
+            snapshot_revision: 0,
             read_task: None,
             directory_watch: None,
             refresh_pending: false,
@@ -86,8 +86,15 @@ impl App {
                     ReadSource::Tag(tag.paths.iter().map(|path| path.0.clone()).collect())
                 }),
         });
+        let tag_pending = matches!(source, Some(ReadSource::MissingTag))
+            .then(|| self.tag_state.read(cx))
+            .filter(|state| state.loaded_tags().is_none())
+            .map(|state| match state.load_error() {
+                Some(error) => DirectoryState::Failed(error.to_owned()),
+                None => DirectoryState::Loading,
+            });
         let browser = &mut self.browser;
-        browser.generation += 1;
+        browser.snapshot_revision += 1;
         browser.read_task = None;
         browser.directory_watch = None;
         browser.refresh_pending = false;
@@ -103,6 +110,11 @@ impl App {
             return;
         };
 
+        if let Some(state) = tag_pending {
+            browser.state = state;
+            cx.notify();
+            return;
+        }
         browser.state = DirectoryState::Loading;
         if let ReadSource::Directory(path) = &source {
             self.watch_directory(path, cx);
@@ -147,7 +159,7 @@ impl App {
 
     fn read_snapshot(&mut self, source: ReadSource, refresh: bool, cx: &mut Context<Self>) {
         let browser = &mut self.browser;
-        let generation = browser.generation;
+        let snapshot_revision = browser.snapshot_revision;
         let cancelled = Arc::new(AtomicBool::new(false));
         let read_cancelled = cancelled.clone();
         let query = browser.query.clone();
@@ -168,7 +180,7 @@ impl App {
         let task = cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.generation != generation {
+                if this.browser.snapshot_revision != snapshot_revision {
                     return;
                 }
                 this.browser.read_task = None;
@@ -189,7 +201,7 @@ impl App {
                     }
                     Err(error) => {
                         let browser = &mut this.browser;
-                        browser.generation += 1;
+                        browser.snapshot_revision += 1;
                         browser.filter_task = None;
                         browser.filtering = false;
                         browser.visible.clear();
@@ -233,7 +245,7 @@ impl App {
             _ => None,
         };
         // 替换快照后，旧卡片和筛选任务不能继续使用原来的索引。
-        browser.generation += 1;
+        browser.snapshot_revision += 1;
         browser.filter_task = None;
         browser.filtering = false;
         browser.state = DirectoryState::Ready(Arc::new(snapshot));
@@ -262,7 +274,7 @@ impl App {
             return;
         };
         let directory = directory.clone();
-        let generation = browser.generation;
+        let snapshot_revision = browser.snapshot_revision;
         let query = browser.query.clone();
         let show_hidden = browser.show_hidden;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -280,7 +292,7 @@ impl App {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.generation == generation {
+                if this.browser.snapshot_revision == snapshot_revision {
                     if this
                         .browser
                         .selected_entry
@@ -324,17 +336,24 @@ impl App {
         let Some((path, kind)) = self.entry_target(index) else {
             return;
         };
-        if kind == EntryKind::Directory {
-            if click_count == 1 {
-                self.navigate(path, window, cx);
-            }
+        let activation = cx
+            .global::<super::preferences::ActivePreferences>()
+            .0
+            .general
+            .activation_policy;
+        let clicks = match activation {
+            settings::config::general::ActivationPolicy::Single => 1,
+            settings::config::general::ActivationPolicy::Double => 2,
+        };
+        if kind == EntryKind::Directory && click_count == clicks {
+            self.navigate(path, window, cx);
             return;
         }
         if self.browser.selected_entry != Some(index) {
             self.browser.selected_entry = Some(index);
             cx.notify();
         }
-        if click_count != 2 || !matches!(kind, EntryKind::File | EntryKind::Symlink) {
+        if click_count != clicks || !matches!(kind, EntryKind::File | EntryKind::Symlink) {
             return;
         }
 
@@ -348,7 +367,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let generation = self.browser.generation;
+        let navigation_revision = self.navigation_revision;
         self.browser.action_error = None;
         cx.notify();
         let open = cx.background_spawn(async move {
@@ -367,7 +386,7 @@ impl App {
         cx.spawn_in(window, async move |this, cx| {
             let result = open.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.browser.generation != generation {
+                if this.navigation_revision != navigation_revision {
                     return;
                 }
                 match result {

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -8,40 +9,104 @@ use gpui_kit::*;
 use hex_color::HexColor;
 use settings::config::tab::Location;
 use settings::tag::{Tag, TagItem};
-use settings::tag_store::TagStore;
+use settings::tag_store::{OptionalField, TagPatch, TagStore};
 use uuid::Uuid;
 
 use super::App;
+use super::io_queue::IoQueue;
 use crate::components::icon_button;
 
 pub(super) struct TagState {
     tags: Tag,
-    store: Option<TagStore>,
-    pub(super) load_error: Option<String>,
+    database: TagDatabase,
+}
+
+enum TagDatabase {
+    Loading,
+    Ready(TagStore),
+    Failed { message: String, retryable: bool },
 }
 
 impl TagState {
-    pub(super) fn open() -> Self {
+    pub(super) fn loading() -> Self {
+        Self {
+            tags: Tag::default(),
+            database: TagDatabase::Loading,
+        }
+    }
+
+    fn open() -> Self {
         match TagStore::open() {
             Ok((store, tags)) => Self {
                 tags,
-                store: Some(store),
-                load_error: None,
+                database: TagDatabase::Ready(store),
             },
-            Err(error) => Self {
-                tags: Tag::default(),
-                store: None,
-                load_error: Some(format!("无法打开标签数据库：{error}")),
-            },
+            Err(error) => {
+                let retryable = matches!(&error, settings::Error::Io(error) if error.kind() == std::io::ErrorKind::TimedOut);
+                Self {
+                    tags: Tag::default(),
+                    database: TagDatabase::Failed {
+                        message: format!("无法打开标签数据库：{error}"),
+                        retryable,
+                    },
+                }
+            }
+        }
+    }
+
+    fn store(&self) -> Option<&TagStore> {
+        match &self.database {
+            TagDatabase::Ready(store) => Some(store),
+            TagDatabase::Loading | TagDatabase::Failed { .. } => None,
+        }
+    }
+
+    pub(super) fn load_error(&self) -> Option<&str> {
+        match &self.database {
+            TagDatabase::Loading | TagDatabase::Ready(_) => None,
+            TagDatabase::Failed { message, .. } => Some(message),
         }
     }
 
     pub(super) fn loaded_tags(&self) -> Option<&Tag> {
-        self.store.as_ref().map(|_| &self.tags)
+        self.store().map(|_| &self.tags)
+    }
+
+    pub(super) fn load_in_background(state: &Entity<Self>, cx: &mut gpui_kit::App) {
+        let state = state.downgrade();
+        cx.spawn(async move |cx| {
+            loop {
+                let fresh = cx.background_spawn(async { Self::open() }).await;
+                let retry = matches!(
+                    fresh.database,
+                    TagDatabase::Failed {
+                        retryable: true,
+                        ..
+                    }
+                );
+                if cx
+                    .update(|cx| {
+                        state.update(cx, |state, cx| {
+                            *state = fresh;
+                            cx.emit(TagChange::Loaded);
+                        })
+                    })
+                    .is_err()
+                    || !retry
+                {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+            }
+        })
+        .detach();
     }
 }
 
 pub(super) enum TagChange {
+    Loaded,
     Details,
     Paths(Uuid),
     Removed(Uuid),
@@ -49,13 +114,28 @@ pub(super) enum TagChange {
 
 impl EventEmitter<TagChange> for TagState {}
 
+enum TagMutation {
+    Saved(TagItem, TagChange),
+    Removed(Uuid),
+}
+
 pub(super) struct TagEditor {
     id: Option<Uuid>,
+    original: (String, String, String),
+    saving: bool,
     path: Option<PathBuf>,
     name: Entity<InputState>,
     color: Entity<InputState>,
     note: Entity<InputState>,
     error: Option<String>,
+}
+
+fn optional_change<T>(changed: bool, value: Option<T>) -> OptionalField<T> {
+    if changed {
+        value.map_or(OptionalField::Clear, OptionalField::Set)
+    } else {
+        OptionalField::Keep
+    }
 }
 
 pub(super) fn tag_color(color: HexColor) -> Hsla {
@@ -75,6 +155,17 @@ impl App {
     ) {
         match *change {
             TagChange::Details => {}
+            TagChange::Loaded => {
+                let navigation = self.navigation_revision;
+                if self.tag_state.read(cx).loaded_tags().is_some() {
+                    self.forget_missing_tags(window, cx);
+                }
+                if self.navigation_revision == navigation
+                    && matches!(self.current_location(), Some(Location::Tag { .. }))
+                {
+                    self.load_directory(cx);
+                }
+            }
             TagChange::Paths(id) => {
                 if self.current_location() == Some(&Location::Tag { id }) {
                     self.load_directory(cx);
@@ -107,6 +198,7 @@ impl App {
             .and_then(|tag| tag.color)
             .map_or_else(String::new, |color| color.display_rgb().to_string());
         let note = tag.and_then(|tag| tag.note.clone()).unwrap_or_default();
+        let original = (name.clone(), color.clone(), note.clone());
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("名称")
@@ -125,6 +217,8 @@ impl App {
         name.update(cx, |input, cx| input.focus(window, cx));
         self.tag_editor = Some(TagEditor {
             id,
+            original,
+            saving: false,
             path,
             name,
             color,
@@ -135,7 +229,7 @@ impl App {
     }
 
     fn apply_tag(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.tag_editor.as_mut() else {
+        let Some(editor) = self.tag_editor.as_mut().filter(|editor| !editor.saving) else {
             return;
         };
         let name = editor.name.read(cx).value().trim().to_owned();
@@ -146,6 +240,10 @@ impl App {
             cx.notify();
             return;
         }
+        let (original_name, original_color, original_note) = &editor.original;
+        let name_changed = name != original_name.trim();
+        let color_changed = !color.eq_ignore_ascii_case(original_color.trim());
+        let note_changed = note != original_note.trim();
         let color = if color.is_empty() {
             None
         } else if let Ok(color) = HexColor::parse_rgb(&color) {
@@ -157,83 +255,137 @@ impl App {
         };
         let note = (!note.is_empty()).then_some(note);
         let id = editor.id;
-        let path = editor.path.as_deref();
-        // 先提交数据库，再更新所有窗口共用的标签数据。
-        let result = self.tag_state.update(cx, |state, cx| {
-            let store = state
-                .store
-                .as_mut()
-                .ok_or_else(|| "标签数据库不可用".to_owned())?;
-            let result = if let Some(id) = id {
-                let existing = state
-                    .tags
-                    .get_mut(id)
-                    .ok_or_else(|| "标签已不存在".to_owned())?;
-                store
-                    .update(id, &name, color, note.as_deref())
-                    .map(|updated_at| existing.update(name, color, note, updated_at))
-            } else {
-                let mut tag = TagItem::new(name, color, note);
-                if let Some(path) = path {
-                    tag.set_path(path.to_owned(), true, tag.updated_at);
-                }
-                store.create(&tag).map(|()| state.tags.insert(tag))
-            };
-            result.map_err(|error| format!("保存标签失败：{error}"))?;
-            cx.emit(TagChange::Details);
-            Ok::<_, String>(())
-        });
-        match result {
-            Ok(()) => {
-                self.tag_editor = None;
-                self.tag_error = None;
-            }
-            Err(error) => editor.error = Some(error),
+        if id.is_some() && !name_changed && !color_changed && !note_changed {
+            self.tag_editor = None;
+            cx.notify();
+            return;
         }
+        let path = editor.path.clone();
+        let editor_name = editor.name.clone();
+        editor.saving = true;
+        self.run_tag_operation(
+            move |store| {
+                let tag = if let Some(id) = id {
+                    store.update(
+                        id,
+                        TagPatch {
+                            name: name_changed.then_some(name.as_str()),
+                            color: optional_change(color_changed, color),
+                            note: optional_change(note_changed, note.as_deref()),
+                        },
+                    )?
+                } else {
+                    let mut tag = TagItem::new(name, color, note);
+                    if let Some(path) = path {
+                        tag.set_path(path, true, tag.updated_at);
+                    }
+                    store.create(&tag)?;
+                    tag
+                };
+                Ok(TagMutation::Saved(tag, TagChange::Details))
+            },
+            move |this, error, cx| {
+                if let Some(editor) = this
+                    .tag_editor
+                    .as_mut()
+                    .filter(|editor| editor.name == editor_name)
+                {
+                    if let Some(error) = error {
+                        editor.error = Some(format!("保存标签失败：{error}"));
+                        editor.saving = false;
+                    } else {
+                        this.tag_editor = None;
+                        this.tag_error = None;
+                    }
+                }
+                cx.notify();
+            },
+            cx,
+        );
         cx.notify();
     }
 
-    pub(super) fn toggle_tag_path(&mut self, id: Uuid, path: PathBuf, cx: &mut Context<Self>) {
-        self.tag_error = self
-            .tag_state
-            .update(cx, |state, cx| {
-                let store = state
-                    .store
-                    .as_mut()
-                    .ok_or_else(|| "标签数据库不可用".to_owned())?;
-                let tag = state
-                    .tags
-                    .get_mut(id)
-                    .ok_or_else(|| "标签已不存在".to_owned())?;
-                let present = !tag.contains(&path);
-                let updated_at = store
-                    .set_path(id, &path, present)
-                    .map_err(|error| format!("更新标签关联失败：{error}"))?;
-                tag.set_path(path, present, updated_at);
-                cx.emit(TagChange::Paths(id));
-                Ok::<_, String>(())
-            })
-            .err();
-        cx.notify();
+    pub(super) fn set_tag_path(
+        &mut self,
+        id: Uuid,
+        path: PathBuf,
+        present: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_tag_operation(
+            move |store| {
+                let tag = store.set_path(id, &path, present)?;
+                Ok(TagMutation::Saved(tag, TagChange::Paths(id)))
+            },
+            |this, error, cx| {
+                this.tag_error = error.map(|error| format!("更新标签关联失败：{error}"));
+                cx.notify();
+            },
+            cx,
+        );
     }
 
     pub(super) fn delete_tag(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.tag_error = self
-            .tag_state
-            .update(cx, |state, cx| {
-                let store = state
-                    .store
-                    .as_mut()
-                    .ok_or_else(|| "标签数据库不可用".to_owned())?;
-                store
-                    .remove(id)
-                    .map_err(|error| format!("删除标签失败：{error}"))?;
-                state.tags.remove(id);
-                cx.emit(TagChange::Removed(id));
-                Ok::<_, String>(())
-            })
-            .err();
-        cx.notify();
+        self.run_tag_operation(
+            move |store| {
+                store.remove(id)?;
+                Ok(TagMutation::Removed(id))
+            },
+            |this, error, cx| {
+                this.tag_error = error.map(|error| format!("删除标签失败：{error}"));
+                cx.notify();
+            },
+            cx,
+        );
+    }
+
+    fn run_tag_operation(
+        &self,
+        work: impl FnOnce(TagStore) -> settings::Result<TagMutation> + Send + 'static,
+        complete: impl FnOnce(&mut Self, Option<String>, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(store) = self.tag_state.read(cx).store().cloned() else {
+            let owner = cx.weak_entity();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |this, cx| {
+                    complete(this, Some("标签数据库不可用".to_owned()), cx);
+                });
+            });
+            return;
+        };
+        let state = self.tag_state.clone();
+        let owner = cx.weak_entity();
+        IoQueue::submit(
+            cx,
+            move || work(store),
+            move |result, cx| {
+                let error = match result {
+                    Ok(mutation) => {
+                        state.update(cx, |state, cx| match mutation {
+                            TagMutation::Saved(tag, mut change) => {
+                                if let Some(existing) = state.tags.get_mut(tag.id) {
+                                    if existing.paths != tag.paths {
+                                        change = TagChange::Paths(tag.id);
+                                    }
+                                    *existing = tag;
+                                } else {
+                                    state.tags.insert(tag);
+                                }
+                                cx.emit(change);
+                            }
+                            TagMutation::Removed(id) => {
+                                state.tags.remove(id);
+                                cx.emit(TagChange::Removed(id));
+                            }
+                        });
+                        None
+                    }
+                    Err(error) => Some(error.to_string()),
+                };
+                let _ = owner.update(cx, |this, cx| complete(this, error, cx));
+            },
+        );
     }
 
     pub(super) fn tag_form(
@@ -252,11 +404,27 @@ impl App {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(div().flex_1().min_w_0().child(Input::new(&editor.name)))
-                    .child(div().flex_1().min_w_0().child(Input::new(&editor.color)))
-                    .child(div().flex_1().min_w_0().child(Input::new(&editor.note)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&editor.name).disabled(editor.saving)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&editor.color).disabled(editor.saving)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&editor.note).disabled(editor.saving)),
+                    )
                     .child(
                         icon_button("save-tag", IconName::Check, "保存标签")
+                            .disabled(editor.saving)
                             .on_click(cx.listener(|this, _, _, cx| this.apply_tag(cx))),
                     )
                     .child(

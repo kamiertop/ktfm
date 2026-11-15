@@ -7,6 +7,7 @@ edition = "2024"
 gpui-kit = "=0.8.0"
 ely-core = { git = "https://github.com/ELY-Open-Source/ely-gpui-components.git", rev = "fea13f129bb4ef393a57ab79c72ee9208082f57c", default-features = false }
 anyhow.workspace = true
+async-channel = "2.5"
 directories.workspace = true
 settings = { path = "../settings" }
 sys = { path = "../sys" }

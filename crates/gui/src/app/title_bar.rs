@@ -73,9 +73,9 @@ impl App {
                 icon_button("bookmark-directory", IconName::Bookmark, bookmark_label)
                     .toggled(bookmarked)
                     .disabled(default_favorite || self.location().is_none())
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(path) = this.location().map(ToOwned::to_owned) {
-                            this.toggle_bookmark(path, BookmarkKind::Directory, cx);
+                            this.set_bookmark(path, BookmarkKind::Directory, !bookmarked, cx);
                         }
                     })),
                 bookmark_label,

@@ -71,6 +71,10 @@ pub fn sidebar_divider_color(mode: ThemeMode) -> Hsla {
     .into()
 }
 
+pub fn file_selection_color(mode: ThemeMode) -> Hsla {
+    rgb(if mode.is_dark() { 0x36577d } else { 0xb4d3f7 }).into()
+}
+
 pub fn icon_color(icon: IconName, mode: ThemeMode) -> Hsla {
     let (light, dark) = match icon {
         IconName::Folder | IconName::Star | IconName::FileArchive => (0x97600d, 0xf2bd68),

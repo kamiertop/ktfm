@@ -129,8 +129,9 @@ impl App {
             })
         });
 
-        let volumes = self.storage.volumes.iter().map(|volume| {
-            let is_mounting = self.storage.mounting.as_ref() == Some(&volume.device);
+        let storage = self.storage.read(cx);
+        let volumes = storage.volumes.iter().map(|volume| {
+            let is_mounting = storage.mounting.as_ref() == Some(&volume.device);
             let label = if is_mounting {
                 format!("{}（挂载中）", volume.label)
             } else {
@@ -214,16 +215,16 @@ impl App {
                     .children(tags),
             )
             .when(
-                !self.storage.volumes.is_empty()
-                    || self.storage.error.is_some()
-                    || self.storage.discovery_error.is_some(),
+                !storage.volumes.is_empty()
+                    || storage.error.is_some()
+                    || storage.discovery_error.is_some(),
                 |content| {
                     content.child(
                         section(cx).children(volumes).when_some(
-                            self.storage
+                            storage
                                 .error
                                 .clone()
-                                .or_else(|| self.storage.discovery_error.clone()),
+                                .or_else(|| storage.discovery_error.clone()),
                             |group, message| {
                                 group
                                     .child(div().px_1().text_sm().text_color(danger).child(message))

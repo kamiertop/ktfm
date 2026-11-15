@@ -110,16 +110,15 @@ impl App {
                 };
                 if matches!(command, Command::NewTab) {
                     self.new_tab(Some(Location::directory(path)), window, cx);
-                } else if let Err(error) = Self::open_window_at(
-                    cx,
-                    Some((path, self.bookmarks.clone(), self.tag_state.clone())),
-                ) {
+                } else if let Err(error) =
+                    Self::open_window_at(cx, Some((path, self.bookmarks.clone())))
+                {
                     self.workspace_error = Some(format!("无法打开新窗口：{error}"));
                     cx.notify();
                 }
             }
             Command::Remove => {
-                self.change_bookmarks(|bookmarks| bookmarks.remove(id), cx);
+                self.change_bookmarks(move |bookmarks| bookmarks.remove(id), cx);
             }
             Command::Rename => {
                 if let Some(anchor_y) = anchor_y {

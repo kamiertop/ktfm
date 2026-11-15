@@ -12,41 +12,50 @@ pub(super) struct StorageDevices {
     pub(super) mounting: Option<PathBuf>,
     pub(super) error: Option<String>,
     pub(super) discovery_error: Option<String>,
+    revision: u64,
 }
 
-impl App {
-    pub(super) fn watch_volumes(&self, cx: &mut Context<Self>) {
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
+pub(super) struct SharedStorage(pub Entity<StorageDevices>);
+
+impl Global for SharedStorage {}
+
+impl SharedStorage {
+    pub(super) fn install(cx: &mut gpui_kit::App) {
+        let state = cx.new(|_| StorageDevices::default());
+        cx.set_global(Self(state.clone()));
+        cx.spawn(async move |cx| {
             loop {
-                let volumes = executor.spawn(async { mount::volumes() }).await;
-                if this
-                    .update(cx, |this, cx| {
+                let revision = cx.update(|cx| state.read(cx).revision);
+                let volumes = cx.background_spawn(async { mount::volumes() }).await;
+                cx.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        if revision != state.revision || state.mounting.is_some() {
+                            return;
+                        }
                         let error = match volumes {
                             Ok(volumes) => {
-                                if this.storage.volumes != volumes {
-                                    this.storage.volumes = volumes;
+                                if state.volumes != volumes {
+                                    state.volumes = volumes;
                                     cx.notify();
                                 }
                                 None
                             }
                             Err(error) => Some(format!("无法读取设备：{error}")),
                         };
-                        if this.storage.discovery_error != error {
-                            this.storage.discovery_error = error;
+                        if state.discovery_error != error {
+                            state.discovery_error = error;
                             cx.notify();
                         }
                     })
-                    .is_err()
-                {
-                    break;
-                }
-                executor.timer(Duration::from_secs(3)).await;
+                });
+                cx.background_executor().timer(Duration::from_secs(3)).await;
             }
         })
         .detach();
     }
+}
 
+impl App {
     pub(super) fn open_volume(
         &mut self,
         volume: &Volume,
@@ -57,39 +66,49 @@ impl App {
             self.navigate(path.clone(), window, cx);
             return;
         }
-        if self.storage.mounting.is_some() {
+        let storage = self.storage.clone();
+        if storage.read(cx).mounting.is_some() {
             return;
         }
         let device = volume.device.clone();
-        self.storage.mounting = Some(device.clone());
-        self.storage.error = None;
-        let generation = self.browser.generation;
+        storage.update(cx, |state, cx| {
+            state.mounting = Some(device.clone());
+            state.error = None;
+            cx.notify();
+        });
+        let revision = self.navigation_revision;
+        let handle = window.window_handle().downcast::<Self>();
         let mount_device = device.clone();
         let mount = cx.background_spawn(async move { mount::mount(&mount_device) });
-        cx.spawn_in(window, async move |this, cx| {
+        cx.spawn(async move |_, cx| {
             let result = mount.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.storage.mounting = None;
-                match result {
-                    Ok(path) => {
-                        if let Some(volume) = this
-                            .storage
-                            .volumes
-                            .iter_mut()
-                            .find(|volume| volume.device == device)
-                        {
-                            volume.mountpoint = Some(path.clone());
+            cx.update(|cx| {
+                storage.update(cx, |state, cx| {
+                    state.mounting = None;
+                    state.revision += 1;
+                    match &result {
+                        Ok(path) => {
+                            if let Some(volume) = state
+                                .volumes
+                                .iter_mut()
+                                .find(|volume| volume.device == device)
+                            {
+                                volume.mountpoint = Some(path.clone());
+                            }
                         }
-                        if this.browser.generation == generation {
+                        Err(error) => state.error = Some(format!("无法挂载：{error}")),
+                    }
+                    cx.notify();
+                });
+                if let (Some(handle), Ok(path)) = (handle, result) {
+                    let _ = handle.update(cx, |this, window, cx| {
+                        if this.navigation_revision == revision {
                             this.navigate(path, window, cx);
                         }
-                    }
-                    Err(error) => this.storage.error = Some(format!("无法挂载：{error}")),
+                    });
                 }
-                cx.notify();
             });
         })
         .detach();
-        cx.notify();
     }
 }

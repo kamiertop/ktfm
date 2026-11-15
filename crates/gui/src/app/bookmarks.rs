@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use ely_core::{forms::surface, overlays::Dialog, primitives::raise};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
@@ -12,6 +13,7 @@ use uuid::Uuid;
 use vfs::EntryKind;
 
 use super::App;
+use super::io_queue::IoQueue;
 use super::workspace::WorkspaceWriter;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color};
 
@@ -96,6 +98,7 @@ pub(super) struct BookmarkRename {
     position: Point<Pixels>,
     previous_focus: Option<FocusHandle>,
     _submit_subscription: Subscription,
+    saving: bool,
 }
 
 impl App {
@@ -114,10 +117,15 @@ impl App {
                 if self.is_default_favorite(path) || bookmarks.find(path).is_some() {
                     return;
                 }
+                let path = path.clone();
                 self.change_bookmarks(
-                    |bookmarks| {
-                        let id = bookmarks.add(path.clone(), BookmarkKind::Directory);
-                        bookmarks.move_before(id, before);
+                    move |bookmarks| {
+                        if bookmarks.find(&path).is_none()
+                            && before.is_none_or(|id| bookmarks.get(id).is_some())
+                        {
+                            let id = bookmarks.add(path, BookmarkKind::Directory);
+                            bookmarks.move_before(id, before);
+                        }
                     },
                     cx,
                 );
@@ -125,7 +133,8 @@ impl App {
             BookmarkDrag::Existing { id, .. }
                 if Some(*id) != before && bookmarks.get(*id).is_some() =>
             {
-                self.change_bookmarks(|bookmarks| bookmarks.move_before(*id, before), cx);
+                let id = *id;
+                self.change_bookmarks(move |bookmarks| bookmarks.move_before(id, before), cx);
             }
             BookmarkDrag::Existing { .. } => {}
         }
@@ -140,45 +149,64 @@ impl App {
     /// 先写入磁盘，再通知各个窗口更新同一份书签列表。
     pub(super) fn change_bookmarks(
         &mut self,
-        change: impl FnOnce(&mut Bookmarks),
+        change: impl FnOnce(&mut Bookmarks) + Send + 'static,
         cx: &mut Context<Self>,
-    ) -> bool {
-        let mut bookmarks = self.bookmarks.read(cx).clone();
-        change(&mut bookmarks);
-        let result = cx.global::<WorkspaceWriter>().save_bookmarks(bookmarks);
-        match result {
-            Ok(bookmarks) => {
-                self.bookmarks.update(cx, |current, cx| {
-                    *current = bookmarks;
-                    cx.notify();
-                });
-                self.workspace_error = None;
-                cx.notify();
-                true
-            }
-            Err(error) => {
-                self.workspace_error = Some(format!("保存书签失败：{error}"));
-                cx.notify();
-                false
-            }
-        }
+    ) {
+        self.change_bookmarks_then(change, |_, _| {}, cx);
     }
 
-    pub(super) fn toggle_bookmark(
+    fn change_bookmarks_then(
+        &mut self,
+        change: impl FnOnce(&mut Bookmarks) + Send + 'static,
+        complete: impl FnOnce(bool, &mut gpui_kit::App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let writer = cx.global::<WorkspaceWriter>().clone();
+        writer.begin_bookmark_update();
+        let finish = writer.clone();
+        let bookmarks = self.bookmarks.clone();
+        let owner = cx.weak_entity();
+        IoQueue::submit(
+            cx,
+            move || writer.change_bookmarks(change),
+            move |result, cx| {
+                finish.finish_bookmark_update();
+                let error = match result {
+                    Ok(saved) => {
+                        bookmarks.update(cx, |current, cx| {
+                            *current = saved;
+                            cx.notify();
+                        });
+                        None
+                    }
+                    Err(error) => Some(format!("保存书签失败：{error}")),
+                };
+                let saved = error.is_none();
+                let _ = owner.update(cx, |this, cx| {
+                    this.workspace_error = error;
+                    cx.notify();
+                });
+                complete(saved, cx);
+            },
+        );
+    }
+
+    pub(super) fn set_bookmark(
         &mut self,
         path: PathBuf,
         kind: BookmarkKind,
+        present: bool,
         cx: &mut Context<Self>,
     ) {
         if self.is_default_favorite(&path) {
             return;
         }
         self.change_bookmarks(
-            |bookmarks| {
-                if let Some(item) = bookmarks.find(&path) {
-                    bookmarks.remove(item.id);
-                } else {
+            move |bookmarks| {
+                if present {
                     bookmarks.add(path, kind);
+                } else if let Some(item) = bookmarks.find(&path) {
+                    bookmarks.remove(item.id);
                 }
             },
             cx,
@@ -232,20 +260,48 @@ impl App {
             position: point(SIDEBAR_WIDTH + px(8.), anchor_y),
             previous_focus,
             _submit_subscription: submit_subscription,
+            saving: false,
         });
         cx.notify();
     }
 
     fn submit_bookmark_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(rename) = &self.bookmark_rename else {
+        let Some(rename) = self
+            .bookmark_rename
+            .as_mut()
+            .filter(|rename| !rename.saving)
+        else {
             return;
         };
+        rename.saving = true;
         let id = rename.id;
-        let name = rename.input.read(cx).value().trim().to_owned();
+        let input = rename.input.clone();
+        let name = input.read(cx).value().trim().to_owned();
         let label = (!name.is_empty()).then_some(name);
-        if self.change_bookmarks(|bookmarks| bookmarks.rename(id, label), cx) {
-            self.close_bookmark_rename(window, cx);
-        }
+        let window = window.window_handle().downcast::<Self>();
+        self.change_bookmarks_then(
+            move |bookmarks| bookmarks.rename(id, label),
+            move |saved, cx| {
+                if let Some(window) = window {
+                    let _ = window.update(cx, |this, window, cx| {
+                        if let Some(rename) = this
+                            .bookmark_rename
+                            .as_mut()
+                            .filter(|rename| rename.input == input)
+                        {
+                            if saved {
+                                this.close_bookmark_rename(window, cx);
+                            } else {
+                                rename.saving = false;
+                                cx.notify();
+                            }
+                        }
+                    });
+                }
+            },
+            cx,
+        );
+        cx.notify();
     }
 
     fn close_bookmark_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -287,10 +343,16 @@ impl App {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().min_w_0().flex_1().child(Input::new(&rename.input)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(Input::new(&rename.input).disabled(rename.saving)),
+                    )
                     .child(
                         Button::new("save-bookmark-name")
                             .primary()
+                            .disabled(rename.saving)
                             .label("重命名")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.submit_bookmark_rename(window, cx);

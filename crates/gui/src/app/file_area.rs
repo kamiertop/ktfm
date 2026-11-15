@@ -18,10 +18,12 @@ use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::{
-    FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, SIDEBAR_WIDTH, icon_color,
+    FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, SIDEBAR_WIDTH,
+    file_selection_color, icon_color,
 };
 
 const CONTENT_PADDING: Pixels = px(16.);
+const FILE_AREA_BOTTOM_PADDING: Pixels = px(56.);
 const GRID_GAP: Pixels = px(8.);
 
 impl App {
@@ -109,7 +111,8 @@ impl App {
                                 )
                                 .track_scroll(&self.browser.scroll)
                                 .size_full()
-                                .px(CONTENT_PADDING),
+                                .px(CONTENT_PADDING)
+                                .pb(FILE_AREA_BOTTOM_PADDING),
                             )
                             .vertical_scrollbar(&self.browser.scroll)
                     }),
@@ -129,6 +132,7 @@ impl App {
                             .clone()
                             .or_else(|| self.workspace_error.clone())
                             .or_else(|| self.tag_error.clone())
+                            .or_else(|| self.tag_state.read(cx).load_error().map(str::to_owned))
                             .or_else(|| cx.global::<WorkspaceWriter>().session_error())
                             .unwrap_or(status),
                     ),
@@ -259,7 +263,7 @@ impl App {
             .and_then(|paths| paths.get(index))
             .and_then(|path| path.parent())
             .map(|parent| parent.to_string_lossy().into_owned());
-        let generation = self.browser.generation;
+        let snapshot_revision = self.browser.snapshot_revision;
         let name = file.name.to_string_lossy().into_owned();
         let (icon, kind) = entry_appearance(file.kind);
         let folder_drag = (file.kind == EntryKind::Directory)
@@ -267,9 +271,14 @@ impl App {
             .flatten()
             .map(|(path, _)| BookmarkDrag::Folder(path));
         let selected = self.browser.selected_entry == Some(index);
-        let hover = cx.theme().list_hover;
-        let active = cx.theme().list_active;
-        let muted = cx.theme().muted_foreground;
+        let theme = cx.theme();
+        let hover = theme.list_hover;
+        let active = file_selection_color(theme.mode);
+        let detail_color = if selected {
+            theme.foreground
+        } else {
+            theme.muted_foreground
+        };
         Some(
             div()
                 .id(("file-entry", index))
@@ -295,14 +304,14 @@ impl App {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event, window, cx| {
-                        this.open_file_item_menu(generation, index, event, cx);
+                        this.open_file_item_menu(snapshot_revision, index, event, cx);
                         window.prevent_default();
                     }),
                 )
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    if this.browser.generation == generation {
+                    if this.browser.snapshot_revision == snapshot_revision {
                         this.activate_entry(index, event.click_count(), window, cx);
                     }
                 }))
@@ -318,7 +327,13 @@ impl App {
                         .max_w_full()
                         .child(div().truncate().child(name))
                         .when_some(source, |name, source| {
-                            name.child(div().truncate().text_xs().text_color(muted).child(source))
+                            name.child(
+                                div()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(detail_color)
+                                    .child(source),
+                            )
                         }),
                 )
                 .when(!grid, |row| {
@@ -327,7 +342,7 @@ impl App {
                             .ml_auto()
                             .flex_shrink_0()
                             .text_sm()
-                            .text_color(muted)
+                            .text_color(detail_color)
                             .child(kind),
                     )
                 }),

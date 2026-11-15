@@ -24,11 +24,23 @@ impl Workspace {
         Self::load_from(&Self::path()?)
     }
 
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::path()?)
+    /// 在跨进程锁内读取最新工作区并更新，锁文件本身不会被原子替换。
+    pub fn update(change: impl FnOnce(&mut Self)) -> Result<Self> {
+        Self::update_at(&Self::path()?, change)
     }
 
-    fn path() -> Result<PathBuf> {
+    fn update_at(path: &Path, change: impl FnOnce(&mut Self)) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let _lock = crate::file_lock::acquire(&path.with_extension("lock"))?;
+        let mut workspace = Self::load_from(path)?;
+        change(&mut workspace);
+        workspace.save_to(path)?;
+        Ok(workspace)
+    }
+
+    pub fn path() -> Result<PathBuf> {
         let dirs = ProjectDirs::from("", "", APP_NAME).ok_or(Error::NoConfigDir)?;
         Ok(dirs.config_dir().join(FILE_NAME))
     }
@@ -92,6 +104,43 @@ mod tests {
     use crate::config::tab::{Location, TabItem};
 
     use uuid::Uuid;
+
+    #[test]
+    fn concurrent_workspace_updates_preserve_bookmarks_and_session() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("ktfm-test-workspace-lock-{}", Uuid::new_v4()));
+        fs::create_dir(&dir)?;
+        let result = (|| {
+            let file = dir.join(FILE_NAME);
+            let start = std::sync::Barrier::new(2);
+            let active = Uuid::new_v4();
+            std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    start.wait();
+                    Workspace::update_at(&file, |workspace| {
+                        workspace
+                            .bookmarks
+                            .add(dir.join("a"), BookmarkKind::Directory);
+                    })
+                });
+                start.wait();
+                Workspace::update_at(&file, |workspace| {
+                    workspace.session.active = Some(active);
+                    workspace
+                        .bookmarks
+                        .add(dir.join("b"), BookmarkKind::Directory);
+                })?;
+                first.join().expect("工作区写入线程正常结束")?;
+                Ok::<_, Error>(())
+            })?;
+
+            let workspace = Workspace::load_from(&file)?;
+            assert_eq!(workspace.session.active, Some(active));
+            assert_eq!(workspace.bookmarks.items().len(), 2);
+            Ok(())
+        })();
+        fs::remove_dir_all(dir)?;
+        result
+    }
 
     #[test]
     fn restores_bookmarks_and_active_tab() -> Result<()> {

@@ -9,13 +9,13 @@ use super::App;
 impl App {
     pub(super) fn open_file_item_menu(
         &mut self,
-        generation: u64,
+        snapshot_revision: u64,
         index: usize,
         event: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) {
         // 切换目录后虚拟列表会复用索引，过期的卡片事件不能作用到新目录。
-        if self.browser.generation != generation {
+        if self.browser.snapshot_revision != snapshot_revision {
             return;
         }
         let Some((path, kind)) = self.entry_target(index) else {
@@ -45,7 +45,8 @@ impl App {
         if let Some(bookmark_kind) = bookmark_kind
             && !self.is_default_favorite(&path)
         {
-            let label = if self.bookmarks.read(cx).find(&path).is_some() {
+            let bookmarked = self.bookmarks.read(cx).find(&path).is_some();
+            let label = if bookmarked {
                 "从书签移除"
             } else {
                 "添加到书签"
@@ -55,7 +56,7 @@ impl App {
             menu = menu.item(MenuItem::new(label).icon(IconName::Bookmark).on_click(
                 move |_, cx| {
                     let _ = app.update(cx, |this, cx| {
-                        this.toggle_bookmark(target.clone(), bookmark_kind, cx)
+                        this.set_bookmark(target.clone(), bookmark_kind, !bookmarked, cx)
                     });
                 },
             ));
@@ -65,13 +66,13 @@ impl App {
             let id = tag.id;
             let app = owner.clone();
             let target = path.clone();
+            let checked = tag.contains(&path);
             menu = menu.item(
-                MenuItem::check(format!("标签 · {}", tag.name), tag.contains(&path)).on_click(
-                    move |_, cx| {
-                        let _ =
-                            app.update(cx, |this, cx| this.toggle_tag_path(id, target.clone(), cx));
-                    },
-                ),
+                MenuItem::check(format!("标签 · {}", tag.name), checked).on_click(move |_, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.set_tag_path(id, target.clone(), !checked, cx)
+                    });
+                }),
             );
         }
         let menu = menu.item(

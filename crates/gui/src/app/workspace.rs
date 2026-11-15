@@ -1,7 +1,11 @@
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::Duration;
 
-use gpui_kit::{AppContext, Context, Global};
+use gpui_kit::{AppContext, Context, Entity, Global};
 use settings::config::{bookmark::Bookmarks, tab::Session, workspace::Workspace};
+
+use vfs::DirectoryWatch;
 
 use super::App;
 
@@ -14,7 +18,8 @@ impl Global for WorkspaceWriter {}
 struct Writer {
     queue: Mutex<Queue>,
     idle: Condvar,
-    disk: Mutex<()>,
+    bookmark_revision: AtomicU64,
+    bookmark_writes: AtomicU64,
 }
 
 #[derive(Default)]
@@ -25,9 +30,83 @@ struct Queue {
 }
 
 impl WorkspaceWriter {
-    pub(super) fn save_bookmarks(&self, bookmarks: Bookmarks) -> settings::Result<Bookmarks> {
-        self.update_disk(move |workspace| workspace.bookmarks = bookmarks)
+    pub(super) fn change_bookmarks(
+        &self,
+        change: impl FnOnce(&mut Bookmarks),
+    ) -> settings::Result<Bookmarks> {
+        Workspace::update(|workspace| change(&mut workspace.bookmarks))
             .map(|workspace| workspace.bookmarks)
+    }
+
+    pub(super) fn begin_bookmark_update(&self) {
+        self.0.bookmark_writes.fetch_add(1, Relaxed);
+    }
+
+    pub(super) fn finish_bookmark_update(&self) {
+        self.0.bookmark_writes.fetch_sub(1, Relaxed);
+        self.0.bookmark_revision.fetch_add(1, Relaxed);
+    }
+
+    pub(super) fn watch_bookmarks(&self, bookmarks: &Entity<Bookmarks>, cx: &mut Context<App>) {
+        let watch = Workspace::path()
+            .map_err(anyhow::Error::from)
+            .and_then(|path| {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                Ok(DirectoryWatch::for_file(&path)?)
+            });
+        let watch = match watch {
+            Ok(watch) => watch,
+            Err(error) => {
+                eprintln!("无法监听书签更新：{error}");
+                return;
+            }
+        };
+        let writer = self.clone();
+        let bookmarks = bookmarks.downgrade();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |_, cx| {
+            // 注册后先补读一次，覆盖启动时读取和注册监听之间的变更。
+            loop {
+                let revision = writer.0.bookmark_revision.load(Relaxed);
+                if writer.0.bookmark_writes.load(Relaxed) != 0 {
+                    executor.timer(Duration::from_millis(20)).await;
+                    continue;
+                }
+                let result = executor.spawn(async { Workspace::load() }).await;
+                let updated = cx.update(|cx| {
+                    bookmarks.update(cx, |bookmarks, cx| {
+                        // 后台读取期间若本进程完成了写入，丢弃旧快照并重读。
+                        if writer.0.bookmark_revision.load(Relaxed) != revision
+                            || writer.0.bookmark_writes.load(Relaxed) != 0
+                        {
+                            return false;
+                        }
+                        match result {
+                            Ok(workspace) if *bookmarks != workspace.bookmarks => {
+                                *bookmarks = workspace.bookmarks;
+                                cx.notify();
+                            }
+                            Err(error) => eprintln!("无法同步书签：{error}"),
+                            _ => {}
+                        }
+                        true
+                    })
+                });
+                match updated {
+                    Ok(false) => continue,
+                    Ok(true) => {}
+                    Err(_) => break,
+                }
+                if !watch.changed().await {
+                    break;
+                }
+                executor.timer(Duration::from_millis(80)).await;
+                watch.coalesce();
+            }
+        })
+        .detach();
     }
 
     pub(super) fn save_session(&self, session: Session, cx: &mut Context<App>) {
@@ -81,8 +160,7 @@ impl WorkspaceWriter {
                 };
                 session
             };
-            let error = self
-                .update_disk(move |workspace| workspace.session = session)
+            let error = Workspace::update(move |workspace| workspace.session = session)
                 .err()
                 .map(|error| format!("保存标签页会话失败：{error}"));
             if let Some(error) = &error {
@@ -94,19 +172,6 @@ impl WorkspaceWriter {
                 .unwrap_or_else(PoisonError::into_inner)
                 .error = error;
         }
-    }
-
-    fn update_disk(&self, change: impl FnOnce(&mut Workspace)) -> settings::Result<Workspace> {
-        // 会话与书签共用同一个文件，读取到写回的全过程必须串行。
-        let _disk = self
-            .0
-            .disk
-            .lock()
-            .map_err(|_| std::io::Error::other("工作区写入锁已损坏"))?;
-        let mut workspace = Workspace::load()?;
-        change(&mut workspace);
-        workspace.save()?;
-        Ok(workspace)
     }
 }
 
