@@ -1,6 +1,7 @@
 mod breadcrumb;
 mod browser;
 mod file_area;
+mod preferences;
 mod sidebar;
 mod tabs;
 mod tags;
@@ -9,5 +10,4 @@ mod view;
 mod volumes;
 mod window_resize;
 
-pub use tabs::NewTab;
 pub use view::App;

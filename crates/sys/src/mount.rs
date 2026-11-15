@@ -22,7 +22,8 @@ mod linux {
 
     #[derive(Deserialize)]
     struct BlockDevices {
-        blockdevices: Vec<BlockDevice>,
+        #[serde(rename = "blockdevices")]
+        block_devices: Vec<BlockDevice>,
     }
 
     #[derive(Deserialize)]
@@ -33,8 +34,10 @@ mod linux {
         rm: bool,
         tran: Option<String>,
         label: Option<String>,
-        fstype: Option<String>,
-        mountpoints: Option<Vec<Option<PathBuf>>>,
+        #[serde(rename = "fstype")]
+        fs_type: Option<String>,
+        #[serde(rename = "mountpoints")]
+        mount_points: Option<Vec<Option<PathBuf>>>,
         #[serde(default)]
         children: Vec<BlockDevice>,
     }
@@ -60,7 +63,7 @@ mod linux {
     fn parse_volumes(json: &[u8]) -> io::Result<Vec<Volume>> {
         let devices: BlockDevices = serde_json::from_slice(json)?;
         let mut volumes = Vec::new();
-        for device in devices.blockdevices {
+        for device in devices.block_devices {
             collect(device, false, &mut volumes);
         }
         volumes.sort_unstable_by(|a, b| (&a.label, &a.device).cmp(&(&b.label, &b.device)));
@@ -69,7 +72,7 @@ mod linux {
 
     fn collect(device: BlockDevice, inherited_removable: bool, volumes: &mut Vec<Volume>) {
         let removable = inherited_removable || device.rm || device.tran.as_deref() == Some("usb");
-        let mountpoints = device.mountpoints.unwrap_or_default();
+        let mountpoints = device.mount_points.unwrap_or_default();
         let mountpoint = mountpoints
             .iter()
             .flatten()
@@ -80,7 +83,7 @@ mod linux {
             })
             .cloned();
         let mountable = matches!(device.kind.as_str(), "disk" | "part")
-            && device.fstype.as_deref().is_some_and(|kind| {
+            && device.fs_type.as_deref().is_some_and(|kind| {
                 !matches!(
                     kind,
                     "swap" | "crypto_LUKS" | "LVM2_member" | "linux_raid_member"

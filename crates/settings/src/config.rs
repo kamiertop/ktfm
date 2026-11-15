@@ -1,6 +1,7 @@
 pub mod action;
 pub mod general;
 pub mod operations;
+pub mod shortcuts;
 pub mod star;
 pub mod tab;
 pub mod view;
@@ -24,6 +25,7 @@ use crate::error::{Error, Result};
 #[serde(default)]
 pub struct AppConfig {
     pub actions: ActionConfig,
+    pub shortcuts: shortcuts::ShortcutConfig,
     pub general: GeneralConfig,
     pub view: ViewConfig,
     pub operations: OperationsConfig,

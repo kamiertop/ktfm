@@ -3,7 +3,7 @@ use std::ops::Range;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::{tab::Location, view::ViewMode};
@@ -11,7 +11,7 @@ use vfs::EntryKind;
 
 use super::App;
 use super::browser::DirectoryState;
-use crate::components::icon_button;
+use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::{
     FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, SIDEBAR_WIDTH, icon_color,
@@ -69,9 +69,6 @@ impl App {
             .min_w_0()
             .min_h_0()
             .child(self.path_breadcrumb(cx))
-            .when(self.show_settings, |area| {
-                area.child(self.file_view_settings(cx))
-            })
             .child(
                 div()
                     .relative()
@@ -126,42 +123,26 @@ impl App {
             )
     }
 
-    fn file_view_settings(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        h_flex()
-            .px_5()
-            .py_2()
-            .gap_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .children(
-                [
-                    (ViewMode::List, IconName::List, "列表"),
-                    (ViewMode::Grid, IconName::LayoutGrid, "网格"),
-                ]
-                .into_iter()
-                .map(|(mode, icon, label)| {
-                    icon_button(label, icon, label)
-                        .label(label)
-                        .toggled(self.view_mode == mode)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.view_mode != mode {
-                                this.view_mode = mode;
-                                this.browser.scroll = UniformListScrollHandle::new();
-                                cx.notify();
-                            }
-                        }))
-                }),
-            )
-            .child(
-                icon_button("hidden-files", IconName::Eye, "显示隐藏文件")
-                    .label("显示隐藏文件")
-                    .toggled(self.browser.show_hidden)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.browser.show_hidden = !this.browser.show_hidden;
-                        this.filter_directory(false, cx);
-                        cx.notify();
-                    })),
-            )
+    pub(super) fn view_switch_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (mode, icon, label) = match self.view_mode {
+            ViewMode::List => (ViewMode::Grid, IconName::LayoutGrid, "切换到网格视图"),
+            ViewMode::Grid => (ViewMode::List, IconName::Rows3, "切换到列表视图"),
+        };
+
+        with_anchored_tooltip(
+            icon_button("switch-file-view", icon, label)
+                .small()
+                .on_click(cx.listener(move |this, _, _, cx| this.set_view_mode(mode, cx))),
+            label,
+        )
+    }
+
+    pub(super) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
+        if self.view_mode != mode {
+            self.view_mode = mode;
+            self.browser.scroll = UniformListScrollHandle::new();
+            cx.notify();
+        }
     }
 
     fn file_row(

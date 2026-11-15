@@ -7,7 +7,8 @@ use settings::tag::Tag;
 use settings::tag_store::TagStore;
 
 use super::browser::Browser;
-use super::tabs::{BrowserTab, NewTab, restore_tabs};
+use super::preferences::{Preferences, shortcut_bindings};
+use super::tabs::{BrowserTab, CloseTab, NewTab, restore_tabs};
 use super::tags::TagEditor;
 use super::volumes::StorageDevices;
 use crate::app::window_resize;
@@ -31,17 +32,29 @@ pub struct App {
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
     pub(super) view_mode: ViewMode,
-    pub(super) show_settings: bool,
+    pub(super) config: AppConfig,
+    pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
 
 impl App {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let home = home_directory();
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索当前页"));
-        let config = AppConfig::load_from_file().unwrap_or_else(|error| {
+        let mut config = AppConfig::load_from_file().unwrap_or_else(|error| {
             eprintln!("无法加载配置：{error}");
             AppConfig::default()
         });
+        match shortcut_bindings(&config.shortcuts, cx) {
+            Ok(bindings) => cx.bind_keys(bindings),
+            Err(error) => {
+                eprintln!("无法加载快捷键：{error}");
+                config.shortcuts = Default::default();
+                cx.bind_keys([
+                    KeyBinding::new("ctrl-t", NewTab, Some("FileManager")),
+                    KeyBinding::new("ctrl-w", CloseTab, Some("FileManager")),
+                ]);
+            }
+        }
         let (workspace, workspace_error) = match Workspace::load() {
             Ok(workspace) => (workspace, None),
             Err(error) => (
@@ -77,7 +90,8 @@ impl App {
             search,
             browser: Browser::new(config.view.show_hidden_files),
             view_mode: config.view.view_mode,
-            show_settings: false,
+            config,
+            preferences: None,
         };
         cx.observe(&app.search, |this, search, cx| {
             let query = search.read(cx).value().trim().to_lowercase();
@@ -102,7 +116,12 @@ impl Render for App {
             .id("file-manager")
             .key_context("FileManager")
             .track_focus(&self.focus)
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_new_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.open_new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
+                this.close_tab(this.active_tab, window, cx);
+            }))
             .relative()
             .size_full()
             .rounded(radius)

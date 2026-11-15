@@ -98,11 +98,7 @@ impl App {
         title_bar(
             navigation,
             radius,
-            self.show_settings,
-            cx.listener(|this, _, _, cx| {
-                this.show_settings = !this.show_settings;
-                cx.notify();
-            }),
+            cx.listener(|this, _, _, cx| this.open_preferences(cx)),
             window,
             [title_drag, toolbar_drag],
             cx,

@@ -5,6 +5,7 @@ use gpui_kit::base::StyledExt as _;
 use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use settings::command::AppCommand;
 use settings::config::tab::{Location, Session, TabItem};
 use settings::config::workspace::Workspace;
 use settings::tag::Tag;
@@ -17,7 +18,7 @@ use crate::style::SIDEBAR_WIDTH;
 const TAB_BAR_PADDING: Pixels = px(8.);
 const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
 
-actions!(browser, [NewTab]);
+actions!(browser, [NewTab, CloseTab]);
 
 pub(super) struct BrowserTab {
     id: Uuid,
@@ -156,7 +157,7 @@ impl App {
         }
     }
 
-    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 || index >= self.tabs.len() {
             return;
         }
@@ -237,10 +238,11 @@ impl App {
     }
 
     pub(super) fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let label: SharedString = format!("新建标签页 ({})", self.config.shortcuts.new_tab).into();
         with_tooltip(
             icon_button("new-tab", IconName::Plus, "新建标签页")
                 .on_click(cx.listener(|this, _, window, cx| this.open_new_tab(window, cx))),
-            "新建标签页 (Ctrl+T)",
+            label,
         )
     }
 
@@ -310,7 +312,17 @@ impl App {
                     .on_mouse_up(
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
-                            this.close_tab(index, window, cx);
+                            match this.config.actions.middle_click_tab.to_command() {
+                                Some(AppCommand::CloseCurrentTab) => {
+                                    this.close_tab(index, window, cx)
+                                }
+                                Some(AppCommand::DuplicateCurrentTab) => {
+                                    if let Some(tab) = this.tabs.get(index) {
+                                        this.new_tab(tab.location().cloned(), window, cx);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }),
                     )
                     .child(

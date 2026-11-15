@@ -111,14 +111,23 @@ impl App {
                 });
 
         h_flex()
+            .w_full()
             .flex_shrink_0()
-            .overflow_hidden()
-            .px_3()
+            .min_w_0()
+            .px_2() // 面包屑的左右内边距
             .pb_1p5()
             .when(self.show_tab_bar(), |bar| bar.pt_1())
-            .gap_0p5() // 左侧间距
+            .gap_2()
             .border_b_1()
             .border_color(border)
-            .children(segments)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .gap_0p5() // IconName::ChevronRight 的左侧间距
+                    .children(segments),
+            )
+            .child(self.view_switch_button(cx))
     }
 }

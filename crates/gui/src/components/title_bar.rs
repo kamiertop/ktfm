@@ -10,7 +10,6 @@ use crate::style::{SIDEBAR_WIDTH, TITLE_BAR_HEIGHT, TITLE_ICON_SIZE, WINDOW_RADI
 pub fn title_bar(
     navigation: impl IntoElement,
     radius: Pixels,
-    show_settings: bool,
     toggle_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
     [title_drag, toolbar_drag]: [Entity<bool>; 2],
@@ -55,8 +54,8 @@ pub fn title_bar(
                 .h_full()
                 .flex_1()
                 .min_w_0()
-                .pl_2()
-                .pr(WINDOW_RADIUS)
+                .pl_1()
+                .pr_2()
                 .gap_2()
                 .child(navigation)
                 .child(drag_region(
@@ -72,13 +71,51 @@ pub fn title_bar(
                     theme_label,
                 ))
                 .child(with_tooltip(
-                    icon_button("settings", IconName::Settings, "视图设置")
-                        .toggled(show_settings)
-                        .on_click(toggle_settings),
-                    "视图设置",
+                    icon_button("settings", IconName::Settings, "设置").on_click(toggle_settings),
+                    "设置",
                 ))
                 .when(client, |bar| bar.child(window_controls(window, cx))),
         )
+}
+
+pub fn preferences_title_bar(
+    radius: Pixels,
+    sidebar_width: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
+    let drag = window.use_state(cx, |_, _| false);
+    let theme = cx.theme();
+    let client = matches!(window.window_decorations(), Decorations::Client { .. });
+    h_flex()
+        .h(TITLE_BAR_HEIGHT)
+        .flex_shrink_0()
+        .pr_2()
+        .child(drag_region(
+            h_flex().h_full().flex_1().min_w_0().child(
+                h_flex()
+                    .w(sidebar_width)
+                    .h_full()
+                    .flex_shrink_0()
+                    .px(WINDOW_RADIUS)
+                    .gap_2()
+                    .rounded_tl(radius)
+                    .bg(theme.sidebar)
+                    .border_r_1()
+                    .border_color(theme.sidebar_border)
+                    .font_semibold()
+                    .child(
+                        Icon::new(IconName::Settings)
+                            .size(TITLE_ICON_SIZE)
+                            .text_color(theme.sidebar_foreground),
+                    )
+                    .child("偏好设置"),
+            ),
+            "preferences-title-drag",
+            window,
+            &drag,
+        ))
+        .when(client, |bar| bar.child(window_controls(window, cx)))
 }
 
 fn drag_region(
