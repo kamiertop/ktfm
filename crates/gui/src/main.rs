@@ -15,13 +15,11 @@ fn main() {
         cx.bind_keys([KeyBinding::new(
             "ctrl-p",
             app::OpenPreferences,
-            Some("FileManager"),
+            Some("FileManager && !EmbeddedTerminal"),
         )]);
 
         cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
+            app::FileOperations::quit_if_idle(cx);
         })
         .detach();
 

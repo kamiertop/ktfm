@@ -30,7 +30,11 @@ const FILE_AREA_BOTTOM_PADDING: Pixels = px(56.);
 const GRID_GAP: Pixels = px(8.);
 
 impl App {
-    pub(super) fn file_area(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn file_area(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
         let count = self.browser.visible.len();
@@ -63,6 +67,12 @@ impl App {
                     None
                 };
                 let mut status = format!("{count} 个项目");
+                if !self.browser.selection.is_empty() {
+                    status.push_str(&format!(" · 已选中 {} 项", self.browser.selection.len()));
+                }
+                if self.file_job_running {
+                    status.push_str(" · 正在执行文件操作…");
+                }
                 if self.browser.filtering {
                     status.push_str(" · 正在筛选…");
                 }
@@ -73,6 +83,13 @@ impl App {
             }
         };
 
+        if let Some(row) = self.browser.reveal_row.take() {
+            self.browser
+                .scroll
+                .scroll_to_item(row / columns, ScrollStrategy::Nearest);
+        }
+        let owner = cx.weak_entity();
+
         v_flex()
             .flex_1()
             .min_w_0()
@@ -82,6 +99,7 @@ impl App {
                 div()
                     .id("file-area-entries")
                     .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        window.focus(&this.focus, cx);
                         this.click_file_area_background(event.click_count(), window, cx);
                     }))
                     .relative()
@@ -116,6 +134,13 @@ impl App {
                                 .pb(FILE_AREA_BOTTOM_PADDING),
                             )
                             .vertical_scrollbar(&self.browser.scroll)
+                    })
+                    .context_menu(move |menu, _, cx| {
+                        if let Some(app) = owner.upgrade() {
+                            app.read(cx).build_file_background_menu(menu, &owner, cx)
+                        } else {
+                            menu
+                        }
                     }),
             )
             .child(
@@ -146,9 +171,8 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.browser.selected_entry.take().is_some() {
-            cx.notify();
-        }
+        self.browser.clear_selection();
+        cx.notify();
         if click_count != 2 {
             return;
         }
@@ -169,15 +193,19 @@ impl App {
     }
 
     fn path_to_copy(&self) -> Option<PathBuf> {
-        self.browser
-            .selected_entry
-            .and_then(|index| self.entry_target(index))
-            .map(|(path, _)| path)
-            .or_else(|| self.location().map(ToOwned::to_owned))
+        if self.browser.selection.len() == 1 {
+            self.browser
+                .selection
+                .first()
+                .and_then(|&index| self.entry_target(index))
+                .map(|(path, _)| path)
+        } else {
+            self.location().map(ToOwned::to_owned)
+        }
     }
 
     pub(super) fn copy_path_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let label = if self.browser.selected_entry.is_some() {
+        let label = if self.browser.selection.len() == 1 {
             "复制选中文件路径"
         } else {
             "复制当前目录路径"
@@ -186,7 +214,7 @@ impl App {
             "copy-path",
             icon_button("copy-full-path", IconName::Copy, label)
                 .small()
-                .disabled(self.browser.selected_entry.is_none() && self.location().is_none())
+                .disabled(self.browser.selection.len() != 1 && self.location().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
                     let Some(path) = this.path_to_copy() else {
                         return;
@@ -299,7 +327,7 @@ impl App {
             .flatten()
             .map(|(path, _)| BookmarkDrag::Folder(path));
         let owner = cx.weak_entity();
-        let selected = self.browser.selected_entry == Some(index);
+        let selected = self.browser.selection.contains(&index);
         let theme = cx.theme();
         let hover = theme.list_hover;
         let active = file_selection_color(theme.mode);
@@ -336,7 +364,12 @@ impl App {
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
                     if this.browser.snapshot_revision == snapshot_revision {
-                        this.activate_entry(index, event.click_count(), window, cx);
+                        window.focus(&this.focus, cx);
+                        let modifiers = match event {
+                            ClickEvent::Mouse(click) => click.down.modifiers,
+                            _ => Modifiers::default(),
+                        };
+                        this.activate_entry(index, event.click_count(), modifiers, window, cx);
                     }
                 }))
                 .when(file.kind == EntryKind::Directory, |entry| {

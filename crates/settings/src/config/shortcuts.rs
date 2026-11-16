@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct ShortcutConfig {
     pub new_tab: String,
     pub close_tab: String,
+    pub open_terminal: String,
 }
 
 impl Default for ShortcutConfig {
@@ -13,6 +14,7 @@ impl Default for ShortcutConfig {
         Self {
             new_tab: "ctrl-t".into(),
             close_tab: "ctrl-w".into(),
+            open_terminal: "ctrl-`".into(),
         }
     }
 }

@@ -10,6 +10,8 @@ use settings::config::{
 
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
 use super::browser::Browser;
+use super::external_terminal::OpenTerminal;
+use super::file_operations::{DirectoryProperties, FileNameEditor, FileOperations};
 use super::io_queue::IoQueue;
 use super::preferences::{ActivePreferences, OpenPreferences, Preferences, shortcut_bindings};
 use super::tabs::{BrowserTab, CloseTab, NewTab, restore_tabs};
@@ -25,7 +27,10 @@ use settings::config::general::StartupBehavior;
 
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
+    pub(super) file_job_running: bool,
+    pub(super) file_name_editor: Option<FileNameEditor>,
+    pub(super) directory_properties: Option<DirectoryProperties>,
     pub(super) tabs: Vec<BrowserTab>,
     pub(super) active_tab: usize,
     pub(super) navigation_revision: u64,
@@ -52,6 +57,7 @@ impl Global for SharedTags {}
 
 impl App {
     pub fn open_main_window(cx: &mut gpui_kit::App) {
+        cx.set_global(FileOperations::default());
         let writer = WorkspaceWriter::default();
         cx.set_global(writer.clone());
         match IoQueue::new() {
@@ -120,8 +126,13 @@ impl App {
                     eprintln!("无法加载快捷键：{error}");
                     config.shortcuts = Default::default();
                     cx.bind_keys([
-                        KeyBinding::new("ctrl-t", NewTab, Some("FileManager")),
-                        KeyBinding::new("ctrl-w", CloseTab, Some("FileManager")),
+                        KeyBinding::new("ctrl-t", NewTab, Some("FileManager && !EmbeddedTerminal")),
+                        KeyBinding::new(
+                            "ctrl-w",
+                            CloseTab,
+                            Some("FileManager && !EmbeddedTerminal"),
+                        ),
+                        KeyBinding::new("ctrl-`", OpenTerminal, Some("FileManager")),
                     ]);
                 }
             }
@@ -179,6 +190,9 @@ impl App {
         let view = &cx.global::<ActivePreferences>().0.view;
         let mut app = Self {
             focus,
+            file_job_running: false,
+            file_name_editor: None,
+            directory_properties: None,
             tabs,
             active_tab,
             navigation_revision: 0,
@@ -233,12 +247,18 @@ impl Render for App {
             .id("file-manager")
             .key_context("FileManager")
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::handle_file_key))
+            .on_action(cx.listener(|this, _: &OpenTerminal, _, cx| this.toggle_terminal(cx)))
             .on_action(cx.listener(|this, _: &OpenPreferences, _, cx| this.open_preferences(cx)))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                this.open_new_tab(window, cx);
+                if this.file_name_editor.is_none() && this.directory_properties.is_none() {
+                    this.open_new_tab(window, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                this.close_tab(this.active_tab, window, cx);
+                if this.file_name_editor.is_none() && this.directory_properties.is_none() {
+                    this.close_tab(this.active_tab, window, cx);
+                }
             }))
             .relative()
             .size_full()
@@ -276,5 +296,7 @@ impl Render for App {
             )
             .children(self.bookmark_rename_view(cx))
             .children(self.bookmark_properties_dialog(cx))
+            .children(self.file_name_dialog(cx))
+            .children(self.directory_properties_dialog(cx))
     }
 }

@@ -23,6 +23,9 @@ pub enum Error {
     #[error("快捷键配置无效：{0}")]
     InvalidShortcuts(String),
 
+    #[error("无效的外部终端程序：{0}")]
+    InvalidExternalTerminal(String),
+
     #[error("配置解析失败: {0}")]
     ConfigParse(#[from] toml::de::Error),
 

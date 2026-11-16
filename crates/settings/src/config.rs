@@ -5,6 +5,7 @@ pub mod general;
 pub mod operations;
 pub mod shortcuts;
 pub mod tab;
+pub mod terminal;
 pub mod view;
 pub mod workspace;
 
@@ -30,6 +31,7 @@ pub struct AppConfig {
     pub general: GeneralConfig,
     pub view: ViewConfig,
     pub operations: OperationsConfig,
+    pub terminal: terminal::TerminalConfig,
 }
 
 pub(crate) const APP_NAME: &str = "ktfm";

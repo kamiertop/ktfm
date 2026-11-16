@@ -2,8 +2,10 @@ mod bookmark_menu;
 mod bookmarks;
 mod breadcrumb;
 mod browser;
+mod external_terminal;
 mod file_area;
 mod file_item_actions;
+mod file_operations;
 mod io_queue;
 mod preferences;
 mod sidebar;
@@ -15,5 +17,6 @@ mod volumes;
 mod window_resize;
 mod workspace;
 
+pub use file_operations::FileOperations;
 pub use preferences::OpenPreferences;
 pub use view::App;

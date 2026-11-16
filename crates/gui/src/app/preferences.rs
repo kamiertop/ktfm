@@ -13,10 +13,12 @@ use settings::config::{
     AppConfig, ViewConfig,
     action::{BlankDoubleClickAction, FolderMiddleClickAction, TabMiddleClickAction},
     shortcuts::ShortcutConfig,
+    terminal::TerminalConfig,
     view::ViewMode,
 };
 
 use super::App;
+use super::external_terminal::OpenTerminal;
 use super::io_queue::IoQueue;
 use super::tabs::{CloseTab, NewTab};
 use super::window_resize;
@@ -36,16 +38,24 @@ enum Page {
     View,
     Behavior,
     Shortcuts,
+    Terminal,
     About,
 }
 
 impl Page {
-    const ALL: [Self; 4] = [Self::View, Self::Behavior, Self::Shortcuts, Self::About];
+    const ALL: [Self; 5] = [
+        Self::View,
+        Self::Behavior,
+        Self::Terminal,
+        Self::Shortcuts,
+        Self::About,
+    ];
 
     fn appearance(self) -> (&'static str, IconName) {
         match self {
             Self::View => ("文件视图", IconName::LayoutGrid),
             Self::Behavior => ("操作行为", IconName::Mouse),
+            Self::Terminal => ("终端", IconName::Terminal),
             Self::Shortcuts => ("快捷键", IconName::Keyboard),
             Self::About => ("关于", IconName::Info),
         }
@@ -55,6 +65,7 @@ impl Page {
 #[derive(Clone)]
 struct PreferenceValues {
     shortcuts: ShortcutConfig,
+    terminal: TerminalConfig,
     view: ViewConfig,
     middle_click_tab: TabMiddleClickAction,
     middle_click_folder: FolderMiddleClickAction,
@@ -68,6 +79,19 @@ impl PreferenceValues {
         }
         if self.shortcuts.close_tab != baseline.shortcuts.close_tab {
             config.shortcuts.close_tab = self.shortcuts.close_tab;
+        }
+        if self.shortcuts.open_terminal != baseline.shortcuts.open_terminal {
+            config.shortcuts.open_terminal = self.shortcuts.open_terminal;
+        }
+        if self.terminal.mode != baseline.terminal.mode {
+            config.terminal.mode = self.terminal.mode;
+        }
+        if self.terminal.external_program != baseline.terminal.external_program {
+            config.terminal.external_program = self.terminal.external_program;
+        }
+        // f32 直接 != 会因精度误差误判变化，用差值比较。
+        if (self.terminal.font_size - baseline.terminal.font_size).abs() > f32::EPSILON {
+            config.terminal.font_size = self.terminal.font_size;
         }
         if self.view.view_mode != baseline.view.view_mode {
             config.view.view_mode = self.view.view_mode;
@@ -100,6 +124,8 @@ pub(super) struct Preferences {
     blank_double_click: BlankDoubleClickAction,
     new_tab: Entity<InputState>,
     close_tab: Entity<InputState>,
+    open_terminal: Entity<InputState>,
+    external_program: Entity<InputState>,
     error: Option<String>,
 }
 
@@ -120,12 +146,14 @@ impl App {
         let middle_click_folder = config.actions.middle_click_folder;
         let blank_double_click = config.actions.blank_double_click;
         let shortcuts = config.shortcuts.clone();
+        let terminal = config.terminal.clone();
         let baseline = PreferenceValues {
             view: view.clone(),
             middle_click_tab,
             middle_click_folder,
             blank_double_click,
             shortcuts: shortcuts.clone(),
+            terminal: terminal.clone(),
         };
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
@@ -163,6 +191,14 @@ impl App {
                         .new(|cx| InputState::new(window, cx).default_value(shortcuts.new_tab)),
                     close_tab: cx
                         .new(|cx| InputState::new(window, cx).default_value(shortcuts.close_tab)),
+                    open_terminal: cx.new(|cx| {
+                        InputState::new(window, cx).default_value(shortcuts.open_terminal)
+                    }),
+                    external_program: cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder("自动检测")
+                            .default_value(terminal.external_program.clone())
+                    }),
                     error: None,
                 }
             })
@@ -181,8 +217,14 @@ fn install_preferences(config: AppConfig, cx: &mut gpui_kit::App) -> Result<(), 
     let bindings = shortcut_bindings(&config.shortcuts, cx)?;
     let old = &cx.global::<ActivePreferences>().0.shortcuts;
     let unbind = [
-        key_binding(&old.new_tab, Unbind(NewTab.name().into()), cx)?,
-        key_binding(&old.close_tab, Unbind(CloseTab.name().into()), cx)?,
+        key_binding(&old.new_tab, Unbind(NewTab.name().into()), false, cx)?,
+        key_binding(&old.close_tab, Unbind(CloseTab.name().into()), false, cx)?,
+        key_binding(
+            &old.open_terminal,
+            Unbind(OpenTerminal.name().into()),
+            true,
+            cx,
+        )?,
     ];
     cx.bind_keys(unbind.into_iter().chain(bindings));
     cx.set_global(ActivePreferences(config));
@@ -198,6 +240,25 @@ impl Preferences {
             shortcuts: ShortcutConfig {
                 new_tab: self.new_tab.read(cx).value().trim().to_ascii_lowercase(),
                 close_tab: self.close_tab.read(cx).value().trim().to_ascii_lowercase(),
+                open_terminal: self
+                    .open_terminal
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .to_ascii_lowercase(),
+            },
+            terminal: TerminalConfig {
+                mode: self.baseline.terminal.mode,
+                font_size: self.baseline.terminal.font_size,
+                external_program: {
+                    let text = self.external_program.read(cx).value();
+                    let original = &self.baseline.terminal.external_program;
+                    if text.as_str() == original.as_str() {
+                        original.clone()
+                    } else {
+                        text.trim().to_string()
+                    }
+                },
             },
             view: self.view.clone(),
             middle_click_tab: self.middle_click_tab,
@@ -214,6 +275,15 @@ impl Preferences {
         IoQueue::submit(
             cx,
             move || {
+                // 程序校验放后台线程：PATH 搜索是文件 IO，不该阻塞 UI；
+                // 失败只报错不落盘，避免保存一个启动不了的配置。
+                if !draft.terminal.external_program.is_empty()
+                    && let Some((name, _)) =
+                        sys::opener::split_command(&draft.terminal.external_program)
+                    && sys::opener::resolve_executable(&name).is_none()
+                {
+                    return Err(settings::Error::InvalidExternalTerminal(name));
+                }
                 AppConfig::update_file(|config| {
                     draft.merge_into(baseline, config);
                     validate_shortcuts(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)
@@ -416,6 +486,23 @@ impl Preferences {
             ))
     }
 
+    fn terminal_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        v_flex()
+            .gap_3()
+            .child(preference_row(
+                "外部终端程序",
+                div()
+                    .w(px(290.))
+                    .child(Input::new(&self.external_program).disabled(self.saving)),
+            ))
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("可填写程序名或绝对路径，支持带参数，例如 kitty --single-instance。留空自动探测。"),
+            )
+    }
+
     fn shortcuts_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
         v_flex()
             .gap_3()
@@ -430,6 +517,12 @@ impl Preferences {
                 div()
                     .w(px(176.))
                     .child(Input::new(&self.close_tab).disabled(self.saving)),
+            ))
+            .child(preference_row(
+                "打开终端",
+                div()
+                    .w(px(176.))
+                    .child(Input::new(&self.open_terminal).disabled(self.saving)),
             ))
             .child(
                 div()
@@ -476,6 +569,7 @@ impl Render for Preferences {
         let content = match self.page {
             Page::View => self.view_page(cx).into_any_element(),
             Page::Behavior => self.behavior_page(cx).into_any_element(),
+            Page::Terminal => self.terminal_page(cx).into_any_element(),
             Page::Shortcuts => self.shortcuts_page(cx).into_any_element(),
             Page::About => self.about_page(cx).into_any_element(),
         };
@@ -637,18 +731,31 @@ fn preference_row(label: &'static str, control: impl IntoElement) -> impl IntoEl
 pub(super) fn shortcut_bindings(
     shortcuts: &ShortcutConfig,
     cx: &gpui_kit::App,
-) -> Result<[KeyBinding; 2], String> {
+) -> Result<[KeyBinding; 3], String> {
     validate_shortcuts(shortcuts)?;
     Ok([
-        key_binding(&shortcuts.new_tab, NewTab, cx)?,
-        key_binding(&shortcuts.close_tab, CloseTab, cx)?,
+        key_binding(&shortcuts.new_tab, NewTab, false, cx)?,
+        key_binding(&shortcuts.close_tab, CloseTab, false, cx)?,
+        key_binding(&shortcuts.open_terminal, OpenTerminal, true, cx)?,
     ])
 }
 
 fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
+    // 后台线程拿不到 cx，用编译期目标推断操作系统：
+    // gpui 0.10 起 Keystroke::parse 只收 &'static str，动态字符串
+    // （配置文件里的值）改走 parse_with_os。
+    let os = if cfg!(target_os = "macos") {
+        OperatingSystem::Mac
+    } else if cfg!(target_os = "windows") {
+        OperatingSystem::Windows
+    } else if cfg!(target_os = "freebsd") {
+        OperatingSystem::FreeBsd
+    } else {
+        OperatingSystem::Linux
+    };
     let parse = |value: &str, label: &str| {
-        let key =
-            Keystroke::parse(value).map_err(|error| format!("{label}的快捷键无效：{error}"))?;
+        let key = Keystroke::parse_with_os(value, os)
+            .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
         if value.split_whitespace().count() != 1
             || key.key.is_empty()
             || !(key.modifiers.control || key.modifiers.alt || key.modifiers.platform)
@@ -659,26 +766,37 @@ fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
     };
     let new = parse(&shortcuts.new_tab, "新建标签页")?;
     let close = parse(&shortcuts.close_tab, "关闭标签页")?;
+    let terminal = parse(&shortcuts.open_terminal, "打开终端")?;
     let preferences = parse("ctrl-p", "偏好设置")?;
-    if new == preferences || close == preferences {
+    if new == preferences || close == preferences || terminal == preferences {
         return Err("Ctrl+P 已用于打开偏好设置".into());
     }
-    if new == close {
+    if new == close || terminal == new || terminal == close {
         return Err("两个操作不能使用相同的快捷键".into());
     }
     Ok(())
 }
 
-fn key_binding(value: &str, action: impl Action, cx: &gpui_kit::App) -> Result<KeyBinding, String> {
-    let context =
-        KeyBindingContextPredicate::parse("FileManager").map_err(|error| error.to_string())?;
+fn key_binding(
+    value: &str,
+    action: impl Action,
+    in_terminal: bool,
+    cx: &gpui_kit::App,
+) -> Result<KeyBinding, String> {
+    let context = if in_terminal {
+        "FileManager"
+    } else {
+        "FileManager && !EmbeddedTerminal"
+    };
+    let context = KeyBindingContextPredicate::parse(context).map_err(|error| error.to_string())?;
     KeyBinding::load(
         value,
         Box::new(action),
         Some(context.into()),
         false,
         None,
-        cx.keyboard_mapper().as_ref(),
+        // gpui-kit 0.10 起 load 直接收 &App，内部自行解析键盘映射。
+        cx,
     )
     .map_err(|error| error.to_string())
 }
@@ -693,6 +811,7 @@ mod tests {
     fn preference_draft_does_not_overwrite_unedited_fields() {
         let baseline = PreferenceValues {
             shortcuts: ShortcutConfig::default(),
+            terminal: Default::default(),
             view: ViewConfig::default(),
             middle_click_tab: AppConfig::default().actions.middle_click_tab,
             middle_click_folder: AppConfig::default().actions.middle_click_folder,

@@ -1,3 +1,4 @@
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -43,7 +44,10 @@ pub(super) struct Browser {
     pub(super) query: String,
     pub(super) show_hidden: bool,
     pub(super) visible: Vec<usize>,
-    pub(super) selected_entry: Option<usize>,
+    pub(super) selection: BTreeSet<usize>,
+    pub(super) anchor: Option<usize>,
+    pub(super) reveal_path: Option<PathBuf>,
+    pub(super) reveal_row: Option<usize>,
     pub(super) scroll: UniformListScrollHandle,
     pub(super) action_error: Option<String>,
     pub(super) filtering: bool,
@@ -55,13 +59,51 @@ pub(super) struct Browser {
 }
 
 impl Browser {
+    pub(super) fn clear_selection(&mut self) {
+        self.selection.clear();
+        self.anchor = None;
+        self.reveal_path = None;
+        self.reveal_row = None;
+    }
+
+    fn select_entry(&mut self, index: usize, modifiers: gpui_kit::Modifiers) {
+        self.reveal_path = None;
+        self.reveal_row = None;
+        if modifiers.shift
+            && let (Some(start), Ok(end)) = (
+                self.anchor
+                    .and_then(|anchor| self.visible.binary_search(&anchor).ok()),
+                self.visible.binary_search(&index),
+            )
+        {
+            if !modifiers.control {
+                self.selection.clear();
+            }
+            self.selection
+                .extend(&self.visible[start.min(end)..=start.max(end)]);
+            return;
+        }
+        if modifiers.control {
+            if !self.selection.remove(&index) {
+                self.selection.insert(index);
+            }
+        } else {
+            self.selection.clear();
+            self.selection.insert(index);
+        }
+        self.anchor = Some(index);
+    }
+
     pub(super) fn new(show_hidden: bool) -> Self {
         Self {
             state: DirectoryState::Unavailable,
             query: String::new(),
             show_hidden,
             visible: Vec::new(),
-            selected_entry: None,
+            selection: BTreeSet::new(),
+            anchor: None,
+            reveal_path: None,
+            reveal_row: None,
             scroll: UniformListScrollHandle::new(),
             action_error: None,
             filtering: false,
@@ -100,7 +142,7 @@ impl App {
         browser.filter_task = None;
         browser.filtering = false;
         browser.visible = Vec::new();
-        browser.selected_entry = None;
+        browser.clear_selection();
         browser.action_error = None;
         browser.scroll = UniformListScrollHandle::new();
         let Some(source) = source else {
@@ -145,15 +187,33 @@ impl App {
         }));
     }
 
+    pub(super) fn refresh_after_file_operation(
+        &mut self,
+        reveal: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.browser.read_task = None;
+        self.browser.refresh_pending = false;
+        self.browser.reveal_path = reveal;
+        self.refresh_directory(cx);
+    }
+
     fn refresh_directory(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.location() else {
-            return;
-        };
         if self.browser.read_task.is_some() {
             self.browser.refresh_pending = true;
-        } else {
-            self.read_snapshot(ReadSource::Directory(path.to_owned()), true, cx);
+            return;
         }
+        let source = match self.current_location() {
+            Some(Location::Directory { path }) => ReadSource::Directory(path.0.clone()),
+            Some(Location::Tag { id }) => {
+                let Some(tag) = self.tags(cx).get(*id) else {
+                    return;
+                };
+                ReadSource::Tag(tag.paths.iter().map(|path| path.0.clone()).collect())
+            }
+            None => return,
+        };
+        self.read_snapshot(source, true, cx);
     }
 
     fn read_snapshot(&mut self, source: ReadSource, refresh: bool, cx: &mut Context<Self>) {
@@ -204,7 +264,7 @@ impl App {
                         browser.filter_task = None;
                         browser.filtering = false;
                         browser.visible.clear();
-                        browser.selected_entry = None;
+                        browser.clear_selection();
                         browser.state = DirectoryState::Failed(error.to_string());
                     }
                 }
@@ -223,25 +283,57 @@ impl App {
 
     fn replace_snapshot(&mut self, snapshot: DirectorySnapshot, visible: Vec<usize>) {
         let browser = &mut self.browser;
-        // 目录按类型和名称排序。按同一个键查找原选中项，避免插入文件后索引错位。
-        browser.selected_entry = match (&browser.state, browser.selected_entry) {
-            (DirectoryState::Ready(previous), Some(index)) => previous
-                .directory
-                .entries
-                .get(index)
-                .and_then(|selected| {
-                    snapshot
-                        .directory
-                        .entries
-                        .binary_search_by(|entry| {
-                            (entry.kind != EntryKind::Directory, &entry.name)
-                                .cmp(&(selected.kind != EntryKind::Directory, &selected.name))
-                        })
-                        .ok()
-                })
-                .filter(|index| visible.contains(index)),
-            _ => None,
-        };
+        // 按排序键恢复选区。标签页可引用多个同名文件，因此也比较完整路径。
+        if let DirectoryState::Ready(previous) = &browser.state
+            && (!browser.selection.is_empty() || browser.anchor.is_some())
+        {
+            let tag_indices = snapshot.paths.as_ref().map(|paths| {
+                paths
+                    .iter()
+                    .enumerate()
+                    .map(|(index, path)| (path, index))
+                    .collect::<HashMap<_, _>>()
+            });
+            let remap = |index: usize| {
+                let new_index =
+                    if let (Some(indices), Some(paths)) = (&tag_indices, &previous.paths) {
+                        *indices.get(paths.get(index)?)?
+                    } else {
+                        let selected = previous.directory.entries.get(index)?;
+                        let key = (selected.kind != EntryKind::Directory, &selected.name);
+                        snapshot
+                            .directory
+                            .entries
+                            .binary_search_by(|entry| {
+                                (entry.kind != EntryKind::Directory, &entry.name).cmp(&key)
+                            })
+                            .ok()?
+                    };
+                visible.binary_search(&new_index).ok().map(|_| new_index)
+            };
+            browser.selection = browser
+                .selection
+                .iter()
+                .filter_map(|&index| remap(index))
+                .collect();
+            browser.anchor = browser.anchor.and_then(remap);
+        }
+        if let Some(path) = browser.reveal_path.take()
+            && let Some(position) = visible.iter().position(|&index| {
+                if let Some(paths) = &snapshot.paths {
+                    paths.get(index) == Some(&path)
+                } else {
+                    snapshot.directory.entries[index].name.as_os_str()
+                        == path.file_name().unwrap_or_default()
+                }
+            })
+        {
+            let index = visible[position];
+            browser.selection.clear();
+            browser.selection.insert(index);
+            browser.anchor = Some(index);
+            browser.reveal_row = Some(position);
+        }
         // 替换快照后，旧卡片和筛选任务不能继续使用原来的索引。
         browser.snapshot_revision += 1;
         browser.filter_task = None;
@@ -290,13 +382,13 @@ impl App {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.browser.snapshot_revision == snapshot_revision {
-                    if this
+                    this.browser
+                        .selection
+                        .retain(|index| visible.binary_search(index).is_ok());
+                    this.browser.anchor = this
                         .browser
-                        .selected_entry
-                        .is_some_and(|index| !visible.contains(&index))
-                    {
-                        this.browser.selected_entry = None;
-                    }
+                        .anchor
+                        .filter(|index| visible.binary_search(index).is_ok());
                     this.browser.visible = visible;
                     this.browser.filtering = false;
                     this.browser.scroll = UniformListScrollHandle::new();
@@ -327,12 +419,18 @@ impl App {
         &mut self,
         index: usize,
         click_count: usize,
+        modifiers: gpui_kit::Modifiers,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some((path, kind)) = self.entry_target(index) else {
             return;
         };
+        if modifiers.shift || modifiers.control {
+            self.browser.select_entry(index, modifiers);
+            cx.notify();
+            return;
+        }
         let activation = cx
             .global::<super::preferences::ActivePreferences>()
             .0
@@ -346,10 +444,8 @@ impl App {
             self.navigate(path, window, cx);
             return;
         }
-        if self.browser.selected_entry != Some(index) {
-            self.browser.selected_entry = Some(index);
-            cx.notify();
-        }
+        self.browser.select_entry(index, modifiers);
+        cx.notify();
         if click_count != clicks || !matches!(kind, EntryKind::File | EntryKind::Symlink) {
             return;
         }
@@ -421,8 +517,42 @@ fn filtered_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomicBool, Relaxed, filtered_entries};
+    use gpui_kit::Modifiers;
+
+    use super::{AtomicBool, Browser, Relaxed, filtered_entries};
     use vfs::{Directory, Entry, EntryKind};
+
+    #[test]
+    fn range_selection_respects_filter_and_control_click_toggles() {
+        let mut browser = Browser::new(false);
+        browser.visible = vec![0, 2, 5, 8];
+        browser.select_entry(2, Modifiers::default());
+        browser.select_entry(
+            8,
+            Modifiers {
+                shift: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            browser.selection.iter().copied().collect::<Vec<_>>(),
+            [2, 5, 8]
+        );
+        browser.select_entry(
+            5,
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            browser.selection.iter().copied().collect::<Vec<_>>(),
+            [2, 8]
+        );
+        browser.clear_selection();
+        assert!(browser.selection.is_empty());
+        assert_eq!(browser.anchor, None);
+    }
 
     #[test]
     fn filters_by_name_and_visibility_without_reordering() {
