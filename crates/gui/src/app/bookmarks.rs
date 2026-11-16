@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use ely_core::{forms::surface, overlays::Dialog, primitives::raise};
 use gpui_kit::assets::IconName;
+use gpui_kit::base::Dialog;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -15,6 +15,7 @@ use vfs::EntryKind;
 use super::App;
 use super::io_queue::IoQueue;
 use super::workspace::WorkspaceWriter;
+use crate::components::popup_surface;
 use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color};
 
 pub(super) enum BookmarkDrag {
@@ -71,7 +72,7 @@ impl Render for BookmarkDragPreview {
             .color
             .unwrap_or_else(|| icon_color(self.icon, cx.theme().mode));
         div().child(
-            surface("bookmark-folder-drag", cx)
+            popup_surface("bookmark-folder-drag", cx)
                 .relative()
                 .left(offset.x)
                 .top(offset.y)
@@ -90,6 +91,12 @@ impl Render for BookmarkDragPreview {
                 .child(div().min_w_0().truncate().child(self.name.clone())),
         )
     }
+}
+
+pub(super) struct BookmarkProperties {
+    id: Uuid,
+    focus: FocusHandle,
+    previous_focus: Option<FocusHandle>,
 }
 
 pub(super) struct BookmarkRename {
@@ -319,8 +326,8 @@ impl App {
     ) -> Option<impl IntoElement + use<>> {
         let rename = self.bookmark_rename.as_ref()?;
         let arrow_y = rename.position.y;
-        let overlay = ely_core::theme::ActiveTheme::theme(&**cx).colors.overlay;
-        let panel = surface("bookmark-rename", cx)
+        let overlay = cx.theme().popover;
+        let panel = popup_surface("bookmark-rename", cx)
             .relative()
             .w(px(320.))
             .rounded(px(14.))
@@ -384,8 +391,7 @@ impl App {
                 .top_0()
                 .bottom_0(),
             );
-        Some(raise(
-            "bookmark-rename-layer",
+        Some(deferred(
             anchored()
                 .position(rename.position - point(px(0.), px(44.)))
                 .snap_to_window()
@@ -393,16 +399,43 @@ impl App {
         ))
     }
 
-    pub(super) fn bookmark_properties_dialog(&self, cx: &Context<Self>) -> Option<Dialog> {
-        let id = self.bookmark_properties?;
+    pub(super) fn open_bookmark_properties(
+        &mut self,
+        id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_focus = window.focused(cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.bookmark_properties = Some(BookmarkProperties {
+            id,
+            focus,
+            previous_focus,
+        });
+        cx.notify();
+    }
+
+    fn close_bookmark_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(properties) = self.bookmark_properties.take() {
+            if let Some(focus) = properties.previous_focus {
+                window.focus(&focus, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(super) fn bookmark_properties_dialog(&self, cx: &mut Context<Self>) -> Option<Dialog> {
+        let properties = self.bookmark_properties.as_ref()?;
         let owner = cx.weak_entity();
-        let details = self.bookmarks.read(cx).get(id).map(|item| {
+        let details = self.bookmarks.read(cx).get(properties.id).map(|item| {
             let kind = if item.kind == BookmarkKind::Directory {
                 "文件夹"
             } else {
                 "文件"
             };
             v_flex()
+                .min_w_0()
                 .gap_1()
                 .text_sm()
                 .child(format!("名称　{}", self.bookmark_label(item)))
@@ -410,19 +443,37 @@ impl App {
                 .child(format!("路径　{}", item.path.0.display()))
         });
         Some(
-            Dialog::new("bookmark-properties", "书签属性", move |_, cx| {
-                let _ = owner.update(cx, |this, cx| {
-                    this.bookmark_properties = None;
-                    cx.notify();
-                });
-            })
-            .children(details)
-            .action(|close| {
-                Button::new("close-bookmark-properties")
-                    .ghost()
-                    .label("关闭")
-                    .on_click(move |_, window, cx| close(window, cx))
-            }),
+            Dialog::new(cx)
+                .focus_handle(properties.focus.clone())
+                .on_open_change(move |open, _, window, cx| {
+                    if !open {
+                        let _ =
+                            owner.update(cx, |this, cx| this.close_bookmark_properties(window, cx));
+                    }
+                })
+                .backdrop(div().size_full().bg(black().opacity(0.35)).occlude())
+                .popup(
+                    popup_surface("bookmark-properties", cx)
+                        .occlude()
+                        .w(px(440.))
+                        .max_w(relative(0.9))
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("书签属性"))
+                        .children(details)
+                        .child(
+                            h_flex().justify_end().child(
+                                Button::new("close-bookmark-properties")
+                                    .ghost()
+                                    .label("关闭")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_bookmark_properties(window, cx)
+                                    })),
+                            ),
+                        ),
+                ),
         )
     }
 }

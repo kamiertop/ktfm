@@ -4,16 +4,19 @@ use std::path::PathBuf;
 use gpui_kit::assets::IconName;
 
 use gpui_kit::base::{Disableable as _, Selectable as _};
+use gpui_kit::component::menu::ContextMenuExt;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use settings::command::AppCommand;
 use settings::config::view::ViewMode;
 use vfs::EntryKind;
 
 use super::App;
 use super::bookmarks::BookmarkDrag;
 use super::browser::DirectoryState;
+use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
@@ -78,10 +81,8 @@ impl App {
             .child(
                 div()
                     .id("file-area-entries")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.browser.selected_entry.take().is_some() {
-                            cx.notify();
-                        }
+                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                        this.click_file_area_background(event.click_count(), window, cx);
                     }))
                     .relative()
                     .flex_1()
@@ -137,6 +138,34 @@ impl App {
                             .unwrap_or(status),
                     ),
             )
+    }
+
+    fn click_file_area_background(
+        &mut self,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser.selected_entry.take().is_some() {
+            cx.notify();
+        }
+        if click_count != 2 {
+            return;
+        }
+        let action = cx
+            .global::<ActivePreferences>()
+            .0
+            .actions
+            .blank_double_click;
+        match action.to_command() {
+            Some(AppCommand::NavigateUp) => {
+                if let Some(parent) = self.location().and_then(std::path::Path::parent) {
+                    self.navigate(parent.to_owned(), window, cx);
+                }
+            }
+            Some(AppCommand::RefreshCurrentDir) => self.load_directory(cx),
+            _ => {}
+        }
     }
 
     fn path_to_copy(&self) -> Option<PathBuf> {
@@ -212,7 +241,6 @@ impl App {
 
     pub(super) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         if self.view_mode != mode {
-            self.file_item_menu.clear();
             self.view_mode = mode;
             self.browser.scroll = UniformListScrollHandle::new();
             cx.notify();
@@ -270,6 +298,7 @@ impl App {
             .then(|| self.entry_target(index))
             .flatten()
             .map(|(path, _)| BookmarkDrag::Folder(path));
+        let owner = cx.weak_entity();
         let selected = self.browser.selected_entry == Some(index);
         let theme = cx.theme();
         let hover = theme.list_hover;
@@ -281,7 +310,9 @@ impl App {
         };
         Some(
             div()
-                .id(("file-entry", index))
+                .id(SharedString::from(format!(
+                    "file-entry-{snapshot_revision}-{index}"
+                )))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -301,13 +332,6 @@ impl App {
                 })
                 .when(selected, |entry| entry.bg(active))
                 .when(!selected, |entry| entry.hover(|style| style.bg(hover)))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this, event, window, cx| {
-                        this.open_file_item_menu(snapshot_revision, index, event, cx);
-                        window.prevent_default();
-                    }),
-                )
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
@@ -315,6 +339,16 @@ impl App {
                         this.activate_entry(index, event.click_count(), window, cx);
                     }
                 }))
+                .when(file.kind == EntryKind::Directory, |entry| {
+                    entry.on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if matches!(event, ClickEvent::Mouse(click) if click.up.button == MouseButton::Middle)
+                            && this.browser.snapshot_revision == snapshot_revision
+                        {
+                            cx.stop_propagation();
+                            this.middle_click_folder(index, window, cx);
+                        }
+                    }))
+                })
                 .child(
                     Icon::new(icon)
                         .size(if grid { GRID_ICON_SIZE } else { FILE_ICON_SIZE })
@@ -345,6 +379,19 @@ impl App {
                             .text_color(detail_color)
                             .child(kind),
                     )
+                })
+                .context_menu(move |menu, _, cx| {
+                    if let Some(app) = owner.upgrade() {
+                        app.read(cx).build_file_item_menu(
+                            snapshot_revision,
+                            index,
+                            menu,
+                            &owner,
+                            cx,
+                        )
+                    } else {
+                        menu
+                    }
                 }),
         )
     }

@@ -75,6 +75,31 @@ pub fn file_selection_color(mode: ThemeMode) -> Hsla {
     rgb(if mode.is_dark() { 0x36577d } else { 0xb4d3f7 }).into()
 }
 
+pub struct PreferencesPalette {
+    pub background: Hsla,
+    pub sidebar: Hsla,
+    pub border: Hsla,
+    pub hover: Hsla,
+    pub selected: Hsla,
+    pub selected_text: Hsla,
+}
+
+pub fn preferences_palette(mode: ThemeMode) -> PreferencesPalette {
+    let (background, sidebar, border, hover, selected, selected_text) = if mode.is_dark() {
+        (0x171e20, 0x202a29, 0x344341, 0x2c3b38, 0x39564d, 0xf1faf7)
+    } else {
+        (0xfcfdfd, 0xeff7f4, 0xdbe8e3, 0xe4f0eb, 0xd0e7de, 0x203c34)
+    };
+    PreferencesPalette {
+        background: rgb(background).into(),
+        sidebar: rgb(sidebar).into(),
+        border: rgb(border).into(),
+        hover: rgb(hover).into(),
+        selected: rgb(selected).into(),
+        selected_text: rgb(selected_text).into(),
+    }
+}
+
 pub fn icon_color(icon: IconName, mode: ThemeMode) -> Hsla {
     let (light, dark) = match icon {
         IconName::Folder | IconName::Star | IconName::FileArchive => (0x97600d, 0xf2bd68),
@@ -84,17 +109,4 @@ pub fn icon_color(icon: IconName, mode: ThemeMode) -> Hsla {
         _ => (0x3667a3, 0x8cbcf5),
     };
     rgb(if mode.is_dark() { dark } else { light }).into()
-}
-
-pub fn sync_menu_theme(cx: &mut App) {
-    use ely_core::theme::{Mode, Theme as ElyTheme};
-
-    let mode = if cx.theme().mode.is_dark() {
-        Mode::Dark
-    } else {
-        Mode::Light
-    };
-    if cx.global::<ElyTheme>().mode() != mode {
-        ElyTheme::set_mode_now(mode, cx);
-    }
 }

@@ -76,7 +76,6 @@ impl Browser {
 
 impl App {
     pub(super) fn load_directory(&mut self, cx: &mut Context<Self>) {
-        self.file_item_menu.clear();
         let source = self.current_location().map(|location| match location {
             Location::Directory { path } => ReadSource::Directory(path.0.clone()),
             Location::Tag { id } => self
@@ -207,7 +206,6 @@ impl App {
                         browser.visible.clear();
                         browser.selected_entry = None;
                         browser.state = DirectoryState::Failed(error.to_string());
-                        this.file_item_menu.clear();
                     }
                 }
                 if refresh_pending {
@@ -250,7 +248,6 @@ impl App {
         browser.filtering = false;
         browser.state = DirectoryState::Ready(Arc::new(snapshot));
         browser.visible = visible;
-        self.file_item_menu.clear();
     }
 
     pub(super) fn search_directory(&mut self, query: String, cx: &mut Context<Self>) {

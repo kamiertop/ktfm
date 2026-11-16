@@ -55,6 +55,7 @@ impl App {
                         IconName::File
                     };
                     let color = item.color.map(tag_color);
+                    let owner = entity.clone();
                     sidebar_row(
                         SharedString::from(format!("bookmark-{id}")),
                         name.clone(),
@@ -76,17 +77,22 @@ impl App {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_bookmark(id, window, cx);
                     }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.open_bookmark_menu(id, event.position, window, cx);
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }),
-                    )
                     .relative()
                     .child(bookmark_drop_half(Some(id), true, cx))
                     .child(bookmark_drop_half(next_id, false, cx))
+                    .context_menu(move |menu, window, cx| {
+                        if let Some(app) = owner.upgrade() {
+                            app.read(cx).build_bookmark_menu(
+                                id,
+                                window.mouse_position().y,
+                                menu,
+                                &owner,
+                                cx,
+                            )
+                        } else {
+                            menu
+                        }
+                    })
                 });
 
         let tags = self.tags(cx).items().iter().map(|tag| {

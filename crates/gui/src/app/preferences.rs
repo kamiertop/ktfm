@@ -1,13 +1,19 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Disableable as _;
+use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme, Icon, StyledExt as _, TitleBar, h_flex, v_flex};
+use gpui_kit::component::switch::Switch;
+use gpui_kit::component::{
+    ActiveTheme, Icon, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::{
-    AppConfig, ViewConfig, action::TabMiddleClickAction, shortcuts::ShortcutConfig, view::ViewMode,
+    AppConfig, ViewConfig,
+    action::{BlankDoubleClickAction, FolderMiddleClickAction, TabMiddleClickAction},
+    shortcuts::ShortcutConfig,
+    view::ViewMode,
 };
 
 use super::App;
@@ -15,7 +21,7 @@ use super::io_queue::IoQueue;
 use super::tabs::{CloseTab, NewTab};
 use super::window_resize;
 use crate::components::preferences_title_bar;
-use crate::style::{APP_ID, WINDOW_RADIUS};
+use crate::style::{APP_ID, WINDOW_RADIUS, preferences_palette};
 
 actions!(browser, [OpenPreferences]);
 
@@ -51,6 +57,8 @@ struct PreferenceValues {
     shortcuts: ShortcutConfig,
     view: ViewConfig,
     middle_click_tab: TabMiddleClickAction,
+    middle_click_folder: FolderMiddleClickAction,
+    blank_double_click: BlankDoubleClickAction,
 }
 
 impl PreferenceValues {
@@ -67,6 +75,12 @@ impl PreferenceValues {
         if self.view.show_hidden_files != baseline.view.show_hidden_files {
             config.view.show_hidden_files = self.view.show_hidden_files;
         }
+        if self.blank_double_click != baseline.blank_double_click {
+            config.actions.blank_double_click = self.blank_double_click;
+        }
+        if self.middle_click_folder != baseline.middle_click_folder {
+            config.actions.middle_click_folder = self.middle_click_folder;
+        }
         if self.middle_click_tab != baseline.middle_click_tab {
             config.actions.middle_click_tab = self.middle_click_tab;
         }
@@ -82,6 +96,8 @@ pub(super) struct Preferences {
     page: Page,
     view: ViewConfig,
     middle_click_tab: TabMiddleClickAction,
+    middle_click_folder: FolderMiddleClickAction,
+    blank_double_click: BlankDoubleClickAction,
     new_tab: Entity<InputState>,
     close_tab: Entity<InputState>,
     error: Option<String>,
@@ -101,10 +117,14 @@ impl App {
         let config = &cx.global::<ActivePreferences>().0;
         let view = config.view.clone();
         let middle_click_tab = config.actions.middle_click_tab;
+        let middle_click_folder = config.actions.middle_click_folder;
+        let blank_double_click = config.actions.blank_double_click;
         let shortcuts = config.shortcuts.clone();
         let baseline = PreferenceValues {
             view: view.clone(),
             middle_click_tab,
+            middle_click_folder,
+            blank_double_click,
             shortcuts: shortcuts.clone(),
         };
         let options = WindowOptions {
@@ -137,6 +157,8 @@ impl App {
                     page: Page::View,
                     view,
                     middle_click_tab,
+                    middle_click_folder,
+                    blank_double_click,
                     new_tab: cx
                         .new(|cx| InputState::new(window, cx).default_value(shortcuts.new_tab)),
                     close_tab: cx
@@ -179,6 +201,8 @@ impl Preferences {
             },
             view: self.view.clone(),
             middle_click_tab: self.middle_click_tab,
+            middle_click_folder: self.middle_click_folder,
+            blank_double_click: self.blank_double_click,
         };
         let baseline = self.baseline.clone();
         let handle = window.window_handle().downcast::<Self>();
@@ -227,13 +251,7 @@ impl Preferences {
     }
 
     fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = cx.theme();
-        let (background, selected, border, hover) = (
-            theme.sidebar,
-            theme.sidebar_accent,
-            theme.sidebar_border,
-            theme.list_hover,
-        );
+        let palette = preferences_palette(cx.theme().mode);
         v_flex()
             .w(PREFERENCES_SIDEBAR_WIDTH)
             .flex_shrink_0()
@@ -241,20 +259,27 @@ impl Preferences {
             .py_4()
             .gap_1()
             .rounded_bl(radius)
-            .bg(background)
+            .bg(palette.sidebar)
             .border_r_1()
-            .border_color(border)
+            .border_color(palette.border)
             .children(Page::ALL.into_iter().map(|page| {
                 let (label, icon) = page.appearance();
+                let active = self.page == page;
                 h_flex()
                     .id(label)
+                    .role(Role::Tab)
+                    .aria_selected(active)
                     .h_9()
                     .gap_2()
                     .px_3()
                     .rounded_md()
                     .cursor_pointer()
-                    .when(self.page == page, |row| row.bg(selected).font_semibold())
-                    .when(self.page != page, |row| row.hover(|style| style.bg(hover)))
+                    .when(active, |row| {
+                        row.bg(palette.selected)
+                            .text_color(palette.selected_text)
+                            .font_semibold()
+                    })
+                    .when(!active, |row| row.hover(|style| style.bg(palette.hover)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.page = page;
                         window.focus(&this.focus, cx);
@@ -270,14 +295,13 @@ impl Preferences {
             .gap_3()
             .child(preference_row(
                 "显示方式",
-                h_flex().gap_1().children(
+                preference_segments(
+                    cx,
                     [(ViewMode::List, "列表"), (ViewMode::Grid, "网格")]
                         .into_iter()
                         .map(|(mode, label)| {
-                            Button::new(label)
-                                .ghost()
-                                .label(label)
-                                .toggled(self.view.view_mode == mode)
+                            preference_choice(label, label, self.view.view_mode == mode, cx)
+                                .disabled(self.saving)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.view.view_mode = mode;
                                     cx.notify();
@@ -287,49 +311,114 @@ impl Preferences {
             ))
             .child(preference_row(
                 "显示隐藏文件",
-                Button::new("hidden-files")
-                    .ghost()
-                    .label(if self.view.show_hidden_files {
-                        "开启"
+                Switch::new("hidden-files")
+                    .accessibility_label("显示隐藏文件")
+                    .color(rgb(if cx.theme().mode.is_dark() {
+                        0x767676
                     } else {
-                        "关闭"
-                    })
-                    .toggled(self.view.show_hidden_files)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.view.show_hidden_files = !this.view.show_hidden_files;
+                        0x454340
+                    }))
+                    .checked(self.view.show_hidden_files)
+                    .disabled(self.saving)
+                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                        this.view.show_hidden_files = *checked;
                         cx.notify();
                     })),
             ))
     }
 
     fn behavior_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        preference_row(
-            "中键点击标签页",
-            h_flex().gap_1().children(
-                [
-                    (TabMiddleClickAction::CloseTab, "关闭"),
-                    (TabMiddleClickAction::CopyTab, "复制"),
-                    (TabMiddleClickAction::None, "无操作"),
-                ]
-                .into_iter()
-                .map(|(action, label)| {
-                    Button::new(label)
-                        .ghost()
-                        .label(label)
-                        .toggled(self.middle_click_tab == action)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.middle_click_tab = action;
-                            cx.notify();
-                        }))
-                }),
-            ),
-        )
+        v_flex()
+            .gap_3()
+            .child(preference_row(
+                "双击文件区空白处",
+                preference_segments(
+                    cx,
+                    [
+                        (
+                            "blank-double-click-up",
+                            "返回上一级",
+                            BlankDoubleClickAction::GoUp,
+                        ),
+                        (
+                            "blank-double-click-refresh",
+                            "刷新",
+                            BlankDoubleClickAction::Refresh,
+                        ),
+                        (
+                            "blank-double-click-none",
+                            "无操作",
+                            BlankDoubleClickAction::None,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, action)| {
+                        preference_choice(id, label, self.blank_double_click == action, cx)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.blank_double_click = action;
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            ))
+            .child(preference_row(
+                "中键点击标签页",
+                preference_segments(
+                    cx,
+                    [
+                        ("middle-click-close", "关闭", TabMiddleClickAction::CloseTab),
+                        ("middle-click-copy", "复制", TabMiddleClickAction::CopyTab),
+                        ("middle-click-none", "无操作", TabMiddleClickAction::None),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, action)| {
+                        preference_choice(id, label, self.middle_click_tab == action, cx)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.middle_click_tab = action;
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            ))
+            .child(preference_row(
+                "中键点击文件夹",
+                preference_segments(
+                    cx,
+                    [
+                        (
+                            "folder-middle-click-tab",
+                            "新标签页",
+                            FolderMiddleClickAction::OpenInNewTab,
+                        ),
+                        (
+                            "folder-middle-click-window",
+                            "新窗口",
+                            FolderMiddleClickAction::OpenInNewWindow,
+                        ),
+                        (
+                            "folder-middle-click-none",
+                            "无操作",
+                            FolderMiddleClickAction::None,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, action)| {
+                        preference_choice(id, label, self.middle_click_folder == action, cx)
+                            .disabled(self.saving)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.middle_click_folder = action;
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            ))
     }
 
     fn shortcuts_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
         v_flex()
             .gap_3()
-            .child(div().font_semibold().child("标签页"))
             .child(preference_row(
                 "新建标签页",
                 div()
@@ -381,12 +470,8 @@ impl Render for Preferences {
             || matches!(window.window_decorations(), Decorations::Client { tiling } if tiling.is_tiled());
         let radius = if square { px(0.) } else { WINDOW_RADIUS };
         let theme = cx.theme();
-        let (background, foreground, border, danger) = (
-            theme.background,
-            theme.foreground,
-            theme.border,
-            theme.danger,
-        );
+        let palette = preferences_palette(theme.mode);
+        let (foreground, danger) = (theme.foreground, theme.danger);
         let (title, _) = self.page.appearance();
         let content = match self.page {
             Page::View => self.view_page(cx).into_any_element(),
@@ -400,9 +485,11 @@ impl Render for Preferences {
             .relative()
             .size_full()
             .rounded(radius)
-            .bg(background)
+            .bg(palette.background)
             .text_color(foreground)
-            .when(!square, |frame| frame.border_1().border_color(border))
+            .when(!square, |frame| {
+                frame.border_1().border_color(palette.border)
+            })
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
@@ -429,12 +516,11 @@ impl Render for Preferences {
                             .min_h_0()
                             .child(
                                 v_flex()
-                                    .id(title)
+                                    .id((ElementId::from("preferences-content"), title))
                                     .flex_1()
                                     .min_h_0()
-                                    .gap_5()
-                                    .p_6()
-                                    .child(div().text_xl().font_semibold().child(title))
+                                    .px_6()
+                                    .py_5()
                                     .child(content)
                                     .overflow_y_scrollbar(),
                             )
@@ -445,7 +531,7 @@ impl Render for Preferences {
                                     .py_3()
                                     .gap_2()
                                     .border_t_1()
-                                    .border_color(border)
+                                    .border_color(palette.border)
                                     .when_some(self.error.clone(), |footer, error| {
                                         footer
                                             .child(div().text_sm().text_color(danger).child(error))
@@ -484,8 +570,64 @@ impl Render for Preferences {
     }
 }
 
+fn preference_segments(
+    cx: &gpui_kit::App,
+    choices: impl IntoIterator<Item = Button>,
+) -> impl IntoElement {
+    let (track, border) = if cx.theme().mode.is_dark() {
+        (0x232b2e, 0x47565b)
+    } else {
+        (0xe9eff0, 0xcbd8da)
+    };
+    h_flex()
+        .flex_shrink_0()
+        .gap_0p5()
+        .p_1()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(border))
+        .bg(rgb(track))
+        .children(choices)
+}
+
+fn preference_choice(
+    id: &'static str,
+    label: &'static str,
+    selected: bool,
+    cx: &gpui_kit::App,
+) -> Button {
+    let (background, foreground, muted, border) = if cx.theme().mode.is_dark() {
+        (0x465457, 0xffffff, 0xc5d0d2, 0x778b8e)
+    } else {
+        (0xffffff, 0x172426, 0x46585b, 0xaebfc2)
+    };
+    Button::new(id)
+        .ghost()
+        .label(label)
+        .small()
+        .h_7()
+        .px_3()
+        .border_1()
+        .border_color(transparent_black())
+        .text_color(rgb(if selected { foreground } else { muted }))
+        .font_weight(if selected {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        })
+        .when(selected, |button| {
+            button
+                .bg(rgb(background))
+                .border_color(rgb(border))
+                .shadow_sm()
+        })
+        .selected(selected)
+        .toggled(selected)
+}
+
 fn preference_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
     h_flex()
+        .min_h_10()
         .justify_between()
         .gap_3()
         .child(div().text_sm().child(label))
@@ -543,7 +685,9 @@ fn key_binding(value: &str, action: impl Action, cx: &gpui_kit::App) -> Result<K
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, PreferenceValues, ShortcutConfig, ViewConfig, ViewMode};
+    use super::{
+        AppConfig, BlankDoubleClickAction, PreferenceValues, ShortcutConfig, ViewConfig, ViewMode,
+    };
 
     #[test]
     fn preference_draft_does_not_overwrite_unedited_fields() {
@@ -551,17 +695,24 @@ mod tests {
             shortcuts: ShortcutConfig::default(),
             view: ViewConfig::default(),
             middle_click_tab: AppConfig::default().actions.middle_click_tab,
+            middle_click_folder: AppConfig::default().actions.middle_click_folder,
+            blank_double_click: BlankDoubleClickAction::GoUp,
         };
         let mut draft = baseline.clone();
         draft.view.show_hidden_files = true;
         let mut latest = AppConfig::default();
         latest.shortcuts.new_tab = "ctrl-shift-t".to_owned();
         latest.view.view_mode = ViewMode::Grid;
+        latest.actions.blank_double_click = BlankDoubleClickAction::Refresh;
 
         draft.merge_into(baseline, &mut latest);
 
         assert_eq!(latest.shortcuts.new_tab, "ctrl-shift-t");
         assert_eq!(latest.view.view_mode, ViewMode::Grid);
         assert!(latest.view.show_hidden_files);
+        assert_eq!(
+            latest.actions.blank_double_click,
+            BlankDoubleClickAction::Refresh
+        );
     }
 }

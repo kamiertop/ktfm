@@ -5,7 +5,10 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 
 use super::{icon_button, window_controls::window_controls, with_tooltip};
-use crate::style::{SIDEBAR_WIDTH, TITLE_BAR_HEIGHT, TITLE_ICON_SIZE, WINDOW_RADIUS, icon_color};
+use crate::style::{
+    SIDEBAR_WIDTH, TITLE_BAR_HEIGHT, TITLE_ICON_SIZE, WINDOW_RADIUS, icon_color,
+    preferences_palette,
+};
 
 pub fn title_bar(
     navigation: impl IntoElement,
@@ -86,6 +89,7 @@ pub fn preferences_title_bar(
 ) -> impl IntoElement {
     let drag = window.use_state(cx, |_, _| false);
     let theme = cx.theme();
+    let palette = preferences_palette(theme.mode);
     let client = matches!(window.window_decorations(), Decorations::Client { .. });
     h_flex()
         .h(TITLE_BAR_HEIGHT)
@@ -100,9 +104,9 @@ pub fn preferences_title_bar(
                     .px(WINDOW_RADIUS)
                     .gap_2()
                     .rounded_tl(radius)
-                    .bg(theme.sidebar)
+                    .bg(palette.sidebar)
                     .border_r_1()
-                    .border_color(theme.sidebar_border)
+                    .border_color(palette.border)
                     .font_semibold()
                     .child(
                         Icon::new(IconName::Settings)

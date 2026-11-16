@@ -18,7 +18,7 @@ pub struct ActionConfig {
     pub ctrl_wheel: CtrlWheelAction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderMiddleClickAction {
     /// 在新标签页中打开文件夹
@@ -52,15 +52,15 @@ pub enum TabMiddleClickAction {
     CopyTab,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BlankDoubleClickAction {
     /// 无操作
-    #[default]
     None,
     /// 刷新当前目录
     Refresh,
     /// 返回上一级目录
+    #[default]
     GoUp,
 }
 

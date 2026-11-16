@@ -8,8 +8,7 @@ use settings::config::{
     AppConfig, bookmark::Bookmarks, tab::Location, view::ViewMode, workspace::Workspace,
 };
 
-use super::bookmark_menu::BookmarkMenu;
-use super::bookmarks::BookmarkRename;
+use super::bookmarks::{BookmarkProperties, BookmarkRename};
 use super::browser::Browser;
 use super::io_queue::IoQueue;
 use super::preferences::{ActivePreferences, OpenPreferences, Preferences, shortcut_bindings};
@@ -18,7 +17,6 @@ use super::tags::{TagEditor, TagState};
 use super::volumes::{SharedStorage, StorageDevices};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
-use crate::components::ItemContextMenu;
 use crate::model::{SidebarItem, default_favorites, home_directory};
 use crate::style::{
     APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_RADIUS, WINDOW_WIDTH,
@@ -32,9 +30,8 @@ pub struct App {
     pub(super) active_tab: usize,
     pub(super) navigation_revision: u64,
     pub(super) bookmarks: Entity<Bookmarks>,
-    pub(super) bookmark_menu: Option<BookmarkMenu>,
     pub(super) bookmark_rename: Option<BookmarkRename>,
-    pub(super) bookmark_properties: Option<uuid::Uuid>,
+    pub(super) bookmark_properties: Option<BookmarkProperties>,
     pub(super) persist_session: bool,
     pub(super) tag_state: Entity<TagState>,
     pub(super) tag_error: Option<String>,
@@ -45,7 +42,6 @@ pub struct App {
     pub(super) default_favorites: Vec<SidebarItem>,
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
-    pub(super) file_item_menu: ItemContextMenu,
     pub(super) view_mode: ViewMode,
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
@@ -187,7 +183,6 @@ impl App {
             active_tab,
             navigation_revision: 0,
             bookmarks,
-            bookmark_menu: None,
             bookmark_rename: None,
             bookmark_properties: None,
             persist_session,
@@ -200,7 +195,6 @@ impl App {
             default_favorites: default_favorites(home),
             search,
             browser: Browser::new(view.show_hidden_files),
-            file_item_menu: ItemContextMenu::default(),
             view_mode: view.view_mode,
             preferences: None,
         };
@@ -280,8 +274,6 @@ impl Render for App {
                     && matches!(window.window_decorations(), Decorations::Client { .. }),
                 |frame| frame.children(window_resize::handles()),
             )
-            .children(self.file_item_menu.element())
-            .children(self.bookmark_menu_view(cx))
             .children(self.bookmark_rename_view(cx))
             .children(self.bookmark_properties_dialog(cx))
     }
