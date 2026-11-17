@@ -11,6 +11,7 @@ mod io_queue;
 mod preferences;
 mod sidebar;
 mod tabs;
+mod tag_menu;
 mod tags;
 mod title_bar;
 mod view;

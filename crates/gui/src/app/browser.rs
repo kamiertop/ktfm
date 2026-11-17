@@ -94,6 +94,14 @@ impl Browser {
         self.anchor = Some(index);
     }
 
+    pub(super) fn select_for_context_menu(&mut self, index: usize) -> bool {
+        if self.selection.contains(&index) {
+            return false;
+        }
+        self.select_entry(index, gpui_kit::Modifiers::default());
+        true
+    }
+
     pub(super) fn new(show_hidden: bool) -> Self {
         Self {
             state: DirectoryState::Unavailable,
@@ -552,6 +560,22 @@ mod tests {
         browser.clear_selection();
         assert!(browser.selection.is_empty());
         assert_eq!(browser.anchor, None);
+    }
+
+    #[test]
+    fn context_menu_preserves_selected_group_and_replaces_it_for_other_entries() {
+        let mut browser = Browser::new(false);
+        browser.selection.extend([2, 5]);
+
+        assert!(!browser.select_for_context_menu(5));
+        assert_eq!(
+            browser.selection.iter().copied().collect::<Vec<_>>(),
+            [2, 5]
+        );
+
+        assert!(browser.select_for_context_menu(8));
+        assert_eq!(browser.selection.iter().copied().collect::<Vec<_>>(), [8]);
+        assert_eq!(browser.anchor, Some(8));
     }
 
     #[test]

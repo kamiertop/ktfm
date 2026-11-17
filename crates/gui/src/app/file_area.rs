@@ -16,6 +16,7 @@ use vfs::EntryKind;
 use super::App;
 use super::bookmarks::BookmarkDrag;
 use super::browser::DirectoryState;
+use super::file_operations::FileOperations;
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
@@ -28,6 +29,7 @@ use crate::style::{
 const CONTENT_PADDING: Pixels = px(16.);
 const FILE_AREA_BOTTOM_PADDING: Pixels = px(56.);
 const GRID_GAP: Pixels = px(8.);
+const PENDING_CUT_OPACITY: f32 = 0.5;
 
 impl App {
     pub(super) fn file_area(
@@ -135,12 +137,18 @@ impl App {
                             )
                             .vertical_scrollbar(&self.browser.scroll)
                     })
-                    .context_menu(move |menu, _, cx| {
-                        if let Some(app) = owner.upgrade() {
-                            app.read(cx).build_file_background_menu(menu, &owner, cx)
-                        } else {
-                            menu
+                    .map(|area| {
+                        if self.location().is_none() && count == 0 {
+                            return area.into_any_element();
                         }
+                        area.context_menu(move |menu, _, cx| {
+                            if let Some(app) = owner.upgrade() {
+                                app.read(cx).build_file_background_menu(menu, &owner, cx)
+                            } else {
+                                menu
+                            }
+                        })
+                        .into_any_element()
                     }),
             )
             .child(
@@ -322,10 +330,20 @@ impl App {
         let snapshot_revision = self.browser.snapshot_revision;
         let name = file.name.to_string_lossy().into_owned();
         let (icon, kind) = entry_appearance(file.kind);
-        let folder_drag = (file.kind == EntryKind::Directory)
-            .then(|| self.entry_target(index))
-            .flatten()
-            .map(|(path, _)| BookmarkDrag::Folder(path));
+        let cut_paths = cx.global::<FileOperations>().pending_cut_paths();
+        let target = if file.kind == EntryKind::Directory || !cut_paths.is_empty() {
+            self.entry_target(index)
+        } else {
+            None
+        };
+        let pending_cut = target
+            .as_ref()
+            .is_some_and(|(path, _)| cut_paths.contains(path));
+        let folder_drag = match target {
+            Some((path, EntryKind::Directory)) => Some(BookmarkDrag::Folder(path)),
+            _ => None,
+        };
+        let content_opacity = if pending_cut { PENDING_CUT_OPACITY } else { 1. };
         let owner = cx.weak_entity();
         let selected = self.browser.selection.contains(&index);
         let theme = cx.theme();
@@ -386,12 +404,13 @@ impl App {
                     Icon::new(icon)
                         .size(if grid { GRID_ICON_SIZE } else { FILE_ICON_SIZE })
                         .flex_shrink_0()
-                        .text_color(icon_color(icon, cx.theme().mode)),
+                        .text_color(icon_color(icon, cx.theme().mode).opacity(content_opacity)),
                 )
                 .child(
                     v_flex()
                         .min_w_0()
                         .max_w_full()
+                        .opacity(content_opacity)
                         .child(div().truncate().child(name))
                         .when_some(source, |name, source| {
                             name.child(
@@ -409,22 +428,12 @@ impl App {
                             .ml_auto()
                             .flex_shrink_0()
                             .text_sm()
-                            .text_color(detail_color)
+                            .text_color(detail_color.opacity(content_opacity))
                             .child(kind),
                     )
                 })
-                .context_menu(move |menu, _, cx| {
-                    if let Some(app) = owner.upgrade() {
-                        app.read(cx).build_file_item_menu(
-                            snapshot_revision,
-                            index,
-                            menu,
-                            &owner,
-                            cx,
-                        )
-                    } else {
-                        menu
-                    }
+                .context_menu(move |menu, window, cx| {
+                    Self::build_file_item_menu(snapshot_revision, index, menu, &owner, window, cx)
                 }),
         )
     }

@@ -3,7 +3,8 @@ use gpui_kit::component::{
     Icon,
     menu::{PopupMenu, PopupMenuItem},
 };
-use gpui_kit::{Context, WeakEntity, Window};
+use gpui_kit::prelude::*;
+use gpui_kit::{Context, Pixels, SharedString, WeakEntity, Window, px};
 use settings::command::AppCommand;
 use settings::config::{bookmark::BookmarkKind, tab::Location};
 use vfs::EntryKind;
@@ -12,6 +13,9 @@ use super::App;
 use super::browser::DirectoryState;
 use super::file_operations::FileAction;
 use super::preferences::ActivePreferences;
+
+// 在组件默认间距上微调图标与文字的距离，正值加宽，负值收窄。
+pub(super) const MENU_ICON_EXTRA_GAP: Pixels = px(3.);
 
 impl App {
     pub(super) fn middle_click_folder(
@@ -44,101 +48,47 @@ impl App {
     }
 
     pub(super) fn build_file_item_menu(
-        &self,
         snapshot_revision: u64,
         index: usize,
-        mut menu: PopupMenu,
+        menu: PopupMenu,
         owner: &WeakEntity<Self>,
-        cx: &gpui_kit::App,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
+        let Some(entity) = owner.upgrade() else {
+            return menu;
+        };
+        let app = entity.read(cx);
         // 切换目录后虚拟列表会复用索引，过期的卡片事件不能作用到新目录。
-        if self.browser.snapshot_revision != snapshot_revision {
+        if app.browser.snapshot_revision != snapshot_revision {
             return menu;
         }
-        let Some((path, kind)) = self.entry_target(index) else {
+        let Some((path, kind)) = app.entry_target(index) else {
             return menu;
         };
 
-        if kind == EntryKind::Directory {
-            let target = Location::directory(path.clone());
-            let app = owner.clone();
-            menu = menu.item(
-                PopupMenuItem::new("在新标签页打开")
-                    .icon(Icon::new(IconName::FolderOpen))
-                    .on_click(move |_, window, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.new_tab(Some(target.clone()), window, cx);
-                        });
-                    }),
-            );
-        }
-        if kind == EntryKind::Directory {
-            menu = menu.item(external_terminal_item(path.clone(), owner));
-        }
-        let bookmark_kind = match kind {
-            EntryKind::Directory => Some(BookmarkKind::Directory),
-            EntryKind::File | EntryKind::Symlink => Some(BookmarkKind::File),
-            _ => None,
-        };
-        if let Some(bookmark_kind) = bookmark_kind
-            && !self.is_default_favorite(&path)
-        {
-            let bookmarked = self.bookmarks.read(cx).find(&path).is_some();
-            let label = if bookmarked {
-                "从书签移除"
-            } else {
-                "添加到书签"
-            };
-            let app = owner.clone();
-            let target = path.clone();
-            menu = menu.item(
-                PopupMenuItem::new(label)
-                    .icon(Icon::new(IconName::Bookmark))
-                    .on_click(move |_, _, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.set_bookmark(target.clone(), bookmark_kind, !bookmarked, cx)
-                        });
-                    }),
-            );
-        }
-
-        for tag in self.tags(cx).items() {
-            let id = tag.id;
-            let app = owner.clone();
-            let target = path.clone();
-            let checked = tag.contains(&path);
-            menu = menu.item(
-                PopupMenuItem::new(format!("标签 · {}", tag.name))
-                    .checked(checked)
-                    .on_click(move |_, _, cx| {
-                        let _ = app.update(cx, |this, cx| {
-                            this.set_tag_path(id, target.clone(), !checked, cx)
-                        });
-                    }),
-            );
-        }
-        let tag_owner = owner.clone();
-        let menu = menu.item(
-            PopupMenuItem::new("新建标签并添加")
-                .icon(Icon::new(IconName::Tag))
-                .on_click(move |_, window, cx| {
-                    let _ = tag_owner.update(cx, |this, cx| {
-                        this.edit_tag(None, Some(path.clone()), window, cx);
-                    });
-                }),
-        );
-
-        let unavailable = self.file_job_running || kind == EntryKind::Missing;
-        let multiple = self.browser.selection.contains(&index) && self.browser.selection.len() > 1;
+        entity.update(cx, |app, cx| {
+            if app.browser.select_for_context_menu(index) {
+                cx.notify();
+            }
+        });
+        let app = entity.read(cx);
+        let unavailable = app.file_job_running || kind == EntryKind::Missing;
+        let multiple = app.browser.selection.contains(&index) && app.browser.selection.len() > 1;
         let target = Some((snapshot_revision, index));
-        [
+        let paste_target = (kind == EntryKind::Directory).then_some(index);
+        let mut menu = [
             ("剪切", IconName::Scissors, FileAction::Cut, unavailable),
             ("复制", IconName::Copy, FileAction::Copy, unavailable),
             (
-                "粘贴",
+                if paste_target.is_some() {
+                    "粘贴到此文件夹"
+                } else {
+                    "粘贴"
+                },
                 IconName::ClipboardPaste,
                 FileAction::Paste,
-                !self.can_paste(cx),
+                !app.can_paste_into(paste_target, cx),
             ),
             (
                 "重命名",
@@ -154,14 +104,76 @@ impl App {
             ),
         ]
         .into_iter()
-        .fold(menu.separator(), |menu, (label, icon, action, disabled)| {
-            let entry = if matches!(action, FileAction::Paste) {
+        .fold(menu, |menu, (label, icon, action, disabled)| {
+            let entry = if matches!(action, FileAction::Paste) && paste_target.is_none() {
                 None
             } else {
                 target
             };
             menu.item(file_menu_item(label, icon, action, entry, disabled, owner))
-        })
+        });
+        menu = menu.separator();
+        if kind == EntryKind::Directory {
+            let target = Location::directory(path.clone());
+            menu = menu
+                .item(app_menu_item(
+                    owner,
+                    "在新标签页打开",
+                    IconName::FolderOpen,
+                    move |app, window, cx| {
+                        app.new_tab(Some(target.clone()), window, cx);
+                    },
+                ))
+                .item(external_terminal_item(path.clone(), owner))
+                .separator();
+        }
+        let bookmark_kind = match kind {
+            EntryKind::Directory => Some(BookmarkKind::Directory),
+            EntryKind::File | EntryKind::Symlink => Some(BookmarkKind::File),
+            _ => None,
+        };
+        if let Some(bookmark_kind) = bookmark_kind
+            && !app.is_default_favorite(&path)
+        {
+            let bookmarked = app.bookmarks.read(cx).find(&path).is_some();
+            let (label, icon) = if bookmarked {
+                ("从侧栏书签移除", IconName::BookmarkMinus)
+            } else {
+                ("添加到侧栏书签", IconName::BookmarkPlus)
+            };
+            let target = path.clone();
+            menu = menu.item(app_menu_item(owner, label, icon, move |app, _, cx| {
+                app.set_bookmark(target.clone(), bookmark_kind, !bookmarked, cx);
+            }));
+        }
+
+        let current_tag = match app.current_location() {
+            Some(Location::Tag { id }) => Some(*id),
+            _ => None,
+        };
+        let tags: Vec<_> = app
+            .tags(cx)
+            .items()
+            .iter()
+            .map(|tag| (tag.id, tag.name.clone(), tag.contains(&path)))
+            .collect();
+        let owner = owner.clone();
+        menu.submenu_with_icon(
+            Some(Icon::new(IconName::Tag).mr(MENU_ICON_EXTRA_GAP)),
+            "标签",
+            window,
+            cx,
+            move |menu, _, cx| {
+                super::tag_menu::build_tag_menu(
+                    menu,
+                    owner.clone(),
+                    path.clone(),
+                    current_tag,
+                    &tags,
+                    cx,
+                )
+            },
+        )
     }
 
     pub(super) fn build_file_background_menu(
@@ -190,14 +202,16 @@ impl App {
                 ));
             }
         }
-        menu = menu.item(file_menu_item(
-            "全选",
-            IconName::ListChecks,
-            FileAction::SelectAll,
-            None,
-            self.browser.visible.is_empty(),
-            owner,
-        ));
+        if !self.browser.visible.is_empty() {
+            menu = menu.item(file_menu_item(
+                "全选",
+                IconName::ListChecks,
+                FileAction::SelectAll,
+                None,
+                false,
+                owner,
+            ));
+        }
         if self.can_paste(cx) {
             menu = menu.item(file_menu_item(
                 "粘贴",
@@ -225,15 +239,31 @@ impl App {
     }
 }
 
+fn icon_menu_item(label: impl Into<SharedString>, icon: IconName) -> PopupMenuItem {
+    PopupMenuItem::new(label).icon(Icon::new(icon).mr(MENU_ICON_EXTRA_GAP))
+}
+
+fn app_menu_item(
+    owner: &WeakEntity<App>,
+    label: impl Into<SharedString>,
+    icon: IconName,
+    action: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
+) -> PopupMenuItem {
+    let owner = owner.clone();
+    icon_menu_item(label, icon).on_click(move |_, window, cx| {
+        let _ = owner.update(cx, |app, cx| action(app, window, cx));
+    })
+}
+
 fn external_terminal_item(path: std::path::PathBuf, owner: &WeakEntity<App>) -> PopupMenuItem {
-    let app = owner.clone();
-    PopupMenuItem::new("打开外部终端")
-        .icon(Icon::new(IconName::SquareTerminal))
-        .on_click(move |_, _, cx| {
-            let _ = app.update(cx, |this, cx| {
-                this.open_external_terminal(path.clone(), cx);
-            });
-        })
+    app_menu_item(
+        owner,
+        "打开外部终端",
+        IconName::SquareTerminal,
+        move |app, _, cx| {
+            app.open_external_terminal(path.clone(), cx);
+        },
+    )
 }
 
 fn file_menu_item(
@@ -244,11 +274,8 @@ fn file_menu_item(
     disabled: bool,
     owner: &WeakEntity<App>,
 ) -> PopupMenuItem {
-    let app = owner.clone();
-    PopupMenuItem::new(label)
-        .icon(Icon::new(icon))
-        .disabled(disabled)
-        .on_click(move |_, window, cx| {
-            let _ = app.update(cx, |this, cx| this.file_action(action, entry, window, cx));
-        })
+    app_menu_item(owner, label, icon, move |app, window, cx| {
+        app.file_action(action, entry, window, cx);
+    })
+    .disabled(disabled)
 }

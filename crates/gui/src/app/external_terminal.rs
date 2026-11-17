@@ -14,6 +14,9 @@ actions!(browser, [OpenTerminal]);
 impl App {
     /// 根据配置打开当前标签页的内嵌终端或启动外部终端。
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tag_editor.is_some() {
+            return;
+        }
         if cx.global::<ActivePreferences>().0.terminal.mode == TerminalMode::Embedded {
             if self.file_name_editor.is_none()
                 && self.directory_properties.is_none()

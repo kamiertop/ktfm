@@ -220,6 +220,8 @@ impl App {
         .detach();
         cx.observe_global::<ActivePreferences>(|_, cx| cx.notify())
             .detach();
+        cx.observe_global::<FileOperations>(|_, cx| cx.notify())
+            .detach();
         cx.observe(&app.bookmarks, |_, _, cx| cx.notify()).detach();
         if persist_session {
             cx.global::<WorkspaceWriter>()
@@ -254,12 +256,18 @@ impl Render for App {
             )
             .on_action(cx.listener(|this, _: &OpenPreferences, _, cx| this.open_preferences(cx)))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
-                if this.file_name_editor.is_none() && this.directory_properties.is_none() {
+                if this.file_name_editor.is_none()
+                    && this.directory_properties.is_none()
+                    && this.tag_editor.is_none()
+                {
                     this.open_new_tab(window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if this.file_name_editor.is_none() && this.directory_properties.is_none() {
+                if this.file_name_editor.is_none()
+                    && this.directory_properties.is_none()
+                    && this.tag_editor.is_none()
+                {
                     this.close_tab(this.active_tab, window, cx);
                 }
             }))
@@ -286,9 +294,6 @@ impl Render for App {
                             .when(self.show_tab_bar(), |panel| {
                                 panel.child(self.tab_bar(window, cx))
                             })
-                            .when_some(self.tag_editor.as_ref(), |panel, editor| {
-                                panel.child(self.tag_form(editor, cx))
-                            })
                             .child(self.file_area(window, cx))
                             .children(self.embedded_terminal_panel(window)),
                     ),
@@ -303,5 +308,6 @@ impl Render for App {
             .children(self.bookmark_properties_dialog(cx))
             .children(self.file_name_dialog(cx))
             .children(self.directory_properties_dialog(cx))
+            .children(self.tag_editor_dialog(cx))
     }
 }
