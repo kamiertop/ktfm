@@ -1,7 +1,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
@@ -13,11 +13,14 @@ use settings::config::{
     AppConfig, ViewConfig,
     action::{BlankDoubleClickAction, FolderMiddleClickAction, TabMiddleClickAction},
     shortcuts::ShortcutConfig,
-    terminal::TerminalConfig,
+    terminal::{
+        DEFAULT_FONT_SIZE, FONT_SIZE_RANGE, TerminalConfig, TerminalCursorShape, TerminalMode,
+    },
     view::ViewMode,
 };
 
 use super::App;
+use super::embed_terminal::parse_background;
 use super::external_terminal::OpenTerminal;
 use super::io_queue::IoQueue;
 use super::tabs::{CloseTab, NewTab};
@@ -62,7 +65,7 @@ impl Page {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PreferenceValues {
     shortcuts: ShortcutConfig,
     terminal: TerminalConfig,
@@ -70,6 +73,19 @@ struct PreferenceValues {
     middle_click_tab: TabMiddleClickAction,
     middle_click_folder: FolderMiddleClickAction,
     blank_double_click: BlankDoubleClickAction,
+}
+
+impl From<&AppConfig> for PreferenceValues {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            shortcuts: config.shortcuts.clone(),
+            terminal: config.terminal.clone(),
+            view: config.view.clone(),
+            middle_click_tab: config.actions.middle_click_tab,
+            middle_click_folder: config.actions.middle_click_folder,
+            blank_double_click: config.actions.blank_double_click,
+        }
+    }
 }
 
 impl PreferenceValues {
@@ -89,8 +105,19 @@ impl PreferenceValues {
         if self.terminal.external_program != baseline.terminal.external_program {
             config.terminal.external_program = self.terminal.external_program;
         }
-        // f32 直接 != 会因精度误差误判变化，用差值比较。
-        if (self.terminal.font_size - baseline.terminal.font_size).abs() > f32::EPSILON {
+        if self.terminal.copy_shortcut != baseline.terminal.copy_shortcut {
+            config.terminal.copy_shortcut = self.terminal.copy_shortcut;
+        }
+        if self.terminal.paste_shortcut != baseline.terminal.paste_shortcut {
+            config.terminal.paste_shortcut = self.terminal.paste_shortcut;
+        }
+        if self.terminal.background != baseline.terminal.background {
+            config.terminal.background = self.terminal.background;
+        }
+        if self.terminal.cursor_shape != baseline.terminal.cursor_shape {
+            config.terminal.cursor_shape = self.terminal.cursor_shape;
+        }
+        if self.terminal.font_size != baseline.terminal.font_size {
             config.terminal.font_size = self.terminal.font_size;
         }
         if self.view.view_mode != baseline.view.view_mode {
@@ -111,6 +138,27 @@ impl PreferenceValues {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShortcutField {
+    NewTab,
+    CloseTab,
+    OpenTerminal,
+    Copy,
+    Paste,
+}
+
+impl ShortcutField {
+    fn label(self) -> &'static str {
+        match self {
+            Self::NewTab => "新建标签页",
+            Self::CloseTab => "关闭标签页",
+            Self::OpenTerminal => "打开终端",
+            Self::Copy => "内置终端复制",
+            Self::Paste => "内置终端粘贴",
+        }
+    }
+}
+
 /// 设置窗口持有自己的草稿，只有保存成功才更新文件管理器。
 pub(super) struct Preferences {
     owner: WeakEntity<App>,
@@ -118,14 +166,11 @@ pub(super) struct Preferences {
     saving: bool,
     focus: FocusHandle,
     page: Page,
-    view: ViewConfig,
-    middle_click_tab: TabMiddleClickAction,
-    middle_click_folder: FolderMiddleClickAction,
-    blank_double_click: BlankDoubleClickAction,
-    new_tab: Entity<InputState>,
-    close_tab: Entity<InputState>,
-    open_terminal: Entity<InputState>,
-    external_program: Entity<InputState>,
+    draft: PreferenceValues,
+    recording: Option<ShortcutField>,
+    shortcut_focus: FocusHandle,
+    choosing_program: bool,
+    terminal_background: Entity<InputState>,
     error: Option<String>,
 }
 
@@ -140,21 +185,7 @@ impl App {
         }
 
         let owner = cx.entity();
-        let config = &cx.global::<ActivePreferences>().0;
-        let view = config.view.clone();
-        let middle_click_tab = config.actions.middle_click_tab;
-        let middle_click_folder = config.actions.middle_click_folder;
-        let blank_double_click = config.actions.blank_double_click;
-        let shortcuts = config.shortcuts.clone();
-        let terminal = config.terminal.clone();
-        let baseline = PreferenceValues {
-            view: view.clone(),
-            middle_click_tab,
-            middle_click_folder,
-            blank_double_click,
-            shortcuts: shortcuts.clone(),
-            terminal: terminal.clone(),
-        };
+        let baseline = PreferenceValues::from(&cx.global::<ActivePreferences>().0);
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
             window_bounds: Some(WindowBounds::centered(size(px(820.), px(580.)), cx)),
@@ -177,28 +208,50 @@ impl App {
 
                 let focus = cx.focus_handle();
                 window.focus(&focus, cx);
+                let shortcut_focus = cx.focus_handle();
+                cx.on_focus_out(
+                    &shortcut_focus,
+                    window,
+                    |this: &mut Preferences, _, _, cx| {
+                        if this.recording.take().is_some() {
+                            cx.notify();
+                        }
+                    },
+                )
+                .detach();
+                let terminal_background = cx.new(|cx| {
+                    InputState::new(window, cx).default_value(baseline.terminal.background.clone())
+                });
+                cx.subscribe_in(
+                    &terminal_background,
+                    window,
+                    |this: &mut Preferences, input, event, window, cx| {
+                        if !matches!(event, InputEvent::Change) || this.embedded_disabled() {
+                            return;
+                        }
+                        let value = input.read(cx).value().trim().to_owned();
+                        if parse_background(&value).is_none() {
+                            this.error =
+                                Some("终端背景色需要使用 #RRGGBB 格式，例如 #161A22".into());
+                            cx.notify();
+                            return;
+                        }
+                        this.change(window, cx, |draft| draft.terminal.background = value);
+                    },
+                )
+                .detach();
+
                 Preferences {
                     owner: owner.downgrade(),
+                    draft: baseline.clone(),
                     baseline,
                     saving: false,
                     focus,
                     page: Page::View,
-                    view,
-                    middle_click_tab,
-                    middle_click_folder,
-                    blank_double_click,
-                    new_tab: cx
-                        .new(|cx| InputState::new(window, cx).default_value(shortcuts.new_tab)),
-                    close_tab: cx
-                        .new(|cx| InputState::new(window, cx).default_value(shortcuts.close_tab)),
-                    open_terminal: cx.new(|cx| {
-                        InputState::new(window, cx).default_value(shortcuts.open_terminal)
-                    }),
-                    external_program: cx.new(|cx| {
-                        InputState::new(window, cx)
-                            .placeholder("自动检测")
-                            .default_value(terminal.external_program.clone())
-                    }),
+                    shortcut_focus,
+                    recording: None,
+                    choosing_program: false,
+                    terminal_background,
                     error: None,
                 }
             })
@@ -214,110 +267,308 @@ impl App {
 }
 
 fn install_preferences(config: AppConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
-    let bindings = shortcut_bindings(&config.shortcuts, cx)?;
     let old = &cx.global::<ActivePreferences>().0.shortcuts;
-    let unbind = [
-        key_binding(&old.new_tab, Unbind(NewTab.name().into()), false, cx)?,
-        key_binding(&old.close_tab, Unbind(CloseTab.name().into()), false, cx)?,
-        key_binding(
-            &old.open_terminal,
-            Unbind(OpenTerminal.name().into()),
-            true,
-            cx,
-        )?,
-    ];
-    cx.bind_keys(unbind.into_iter().chain(bindings));
+    if config.shortcuts != *old {
+        let bindings = shortcut_bindings(&config.shortcuts, cx)?;
+        let unbind = [
+            key_binding(&old.new_tab, Unbind(NewTab.name().into()), false, cx)?,
+            key_binding(&old.close_tab, Unbind(CloseTab.name().into()), false, cx)?,
+            key_binding(
+                &old.open_terminal,
+                Unbind(OpenTerminal.name().into()),
+                true,
+                cx,
+            )?,
+        ];
+        cx.bind_keys(unbind.into_iter().chain(bindings));
+    }
     cx.set_global(ActivePreferences(config));
     Ok(())
 }
 
 impl Preferences {
+    fn busy(&self) -> bool {
+        self.saving || self.choosing_program
+    }
+
+    fn embedded_disabled(&self) -> bool {
+        self.busy() || self.draft.terminal.mode != TerminalMode::Embedded
+    }
+
+    fn change(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut PreferenceValues),
+    ) {
+        if !self.busy() {
+            update(&mut self.draft);
+            self.save(window, cx);
+        }
+    }
+
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving {
+        if self.busy() {
             return;
         }
-        let draft = PreferenceValues {
-            shortcuts: ShortcutConfig {
-                new_tab: self.new_tab.read(cx).value().trim().to_ascii_lowercase(),
-                close_tab: self.close_tab.read(cx).value().trim().to_ascii_lowercase(),
-                open_terminal: self
-                    .open_terminal
-                    .read(cx)
-                    .value()
-                    .trim()
-                    .to_ascii_lowercase(),
-            },
-            terminal: TerminalConfig {
-                mode: self.baseline.terminal.mode,
-                font_size: self.baseline.terminal.font_size,
-                external_program: {
-                    let text = self.external_program.read(cx).value();
-                    let original = &self.baseline.terminal.external_program;
-                    if text.as_str() == original.as_str() {
-                        original.clone()
-                    } else {
-                        text.trim().to_string()
-                    }
-                },
-            },
-            view: self.view.clone(),
-            middle_click_tab: self.middle_click_tab,
-            middle_click_folder: self.middle_click_folder,
-            blank_double_click: self.blank_double_click,
-        };
+        self.error = None;
+        let draft = self.draft.clone();
         let baseline = self.baseline.clone();
+        if draft == baseline {
+            cx.notify();
+            return;
+        }
         let handle = window.window_handle().downcast::<Self>();
         let owner = self.owner.clone();
         let update_mode = draft.view.view_mode != baseline.view.view_mode;
         let update_hidden = draft.view.show_hidden_files != baseline.view.show_hidden_files;
         self.saving = true;
-        self.error = None;
         IoQueue::submit(
             cx,
             move || {
-                // 程序校验放后台线程：PATH 搜索是文件 IO，不该阻塞 UI；
-                // 失败只报错不落盘，避免保存一个启动不了的配置。
-                if !draft.terminal.external_program.is_empty()
-                    && let Some((name, _)) =
-                        sys::opener::split_command(&draft.terminal.external_program)
-                    && sys::opener::resolve_executable(&name).is_none()
+                let program = &draft.terminal.external_program;
+                if *program != baseline.terminal.external_program
+                    && !program.is_empty()
+                    && sys::opener::split_command(program)
+                        .and_then(|(name, _)| sys::opener::resolve_executable(&name))
+                        .is_none()
                 {
-                    return Err(settings::Error::InvalidExternalTerminal(name));
+                    return Err(settings::Error::InvalidExternalTerminal(program.clone()));
                 }
+                let check_shortcuts = draft.shortcuts != baseline.shortcuts
+                    || draft.terminal.copy_shortcut != baseline.terminal.copy_shortcut
+                    || draft.terminal.paste_shortcut != baseline.terminal.paste_shortcut;
                 AppConfig::update_file(|config| {
                     draft.merge_into(baseline, config);
-                    validate_shortcuts(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)
+                    if check_shortcuts {
+                        validate_shortcuts(&config.shortcuts)
+                            .and_then(|()| validate_terminal_shortcuts(config))
+                            .map_err(settings::Error::InvalidShortcuts)?;
+                    }
+                    Ok(())
                 })
             },
             move |result, cx| {
                 let result = result
                     .map_err(|error| error.to_string())
                     .and_then(|config| {
-                        let view = config.view.clone();
+                        let saved = PreferenceValues::from(&config);
                         install_preferences(config, cx)?;
                         let _ = owner.update(cx, |owner, cx| {
                             if update_mode {
-                                owner.set_view_mode(view.view_mode, cx);
+                                owner.set_view_mode(saved.view.view_mode, cx);
                             }
                             if update_hidden {
-                                owner.set_show_hidden_files(view.show_hidden_files, cx);
+                                owner.set_show_hidden_files(saved.view.show_hidden_files, cx);
                             }
                         });
-                        Ok(())
+                        Ok(saved)
                     });
                 if let Some(handle) = handle {
-                    let _ = handle.update(cx, |this, window, cx| match result {
-                        Ok(()) => window.remove_window(),
-                        Err(error) => {
-                            this.saving = false;
-                            this.error = Some(error);
-                            cx.notify();
+                    let _ = handle.update(cx, |this, window, cx| {
+                        this.saving = false;
+                        let submitted_background = this.draft.terminal.background.clone();
+                        match result {
+                            Ok(saved) => this.baseline = saved,
+                            Err(error) => this.error = Some(error),
                         }
+                        this.draft = this.baseline.clone();
+                        let background = &this.draft.terminal.background;
+                        if *background != submitted_background
+                            && this.terminal_background.read(cx).value().trim()
+                                == submitted_background
+                        {
+                            this.terminal_background.update(cx, |input, cx| {
+                                input.set_value(background.clone(), window, cx);
+                            });
+                        }
+                        cx.notify();
                     });
                 }
             },
         );
         cx.notify();
+    }
+
+    fn shortcut_value(&mut self, field: ShortcutField) -> &mut String {
+        match field {
+            ShortcutField::NewTab => &mut self.draft.shortcuts.new_tab,
+            ShortcutField::CloseTab => &mut self.draft.shortcuts.close_tab,
+            ShortcutField::OpenTerminal => &mut self.draft.shortcuts.open_terminal,
+            ShortcutField::Copy => &mut self.draft.terminal.copy_shortcut,
+            ShortcutField::Paste => &mut self.draft.terminal.paste_shortcut,
+        }
+    }
+
+    fn record_shortcut(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(field) = self.recording else { return };
+        if !self.shortcut_focus.is_focused(window) {
+            return;
+        }
+        cx.stop_propagation();
+        if event.is_held || self.busy() {
+            return;
+        }
+        let key = &event.keystroke;
+        if key.key == "escape" && !key.modifiers.modified() {
+            self.recording = None;
+            self.error = None;
+        } else {
+            let value = key.unparse(shortcut_os());
+            if let Err(error) = parse_shortcut(&value, field.label()) {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+            *self.shortcut_value(field) = value;
+            self.recording = None;
+            window.focus(&self.focus, cx);
+            self.save(window, cx);
+            return;
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn shortcut_row(
+        &self,
+        field: ShortcutField,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let recording = self.recording == Some(field);
+        let caption = if recording {
+            "按键（esc 取消）".to_owned()
+        } else {
+            parse_shortcut(value, field.label()).map_or_else(
+                |_| value.to_lowercase(),
+                |key| {
+                    let binding = key.unparse(shortcut_os());
+                    let prefix = &binding[..binding.len() - key.key.len()];
+                    format!("{}{}", prefix.replace('-', "+"), key.key.to_lowercase())
+                },
+            )
+        };
+        preference_row(
+            field.label(),
+            Button::new(field.label())
+                .outline()
+                .w(px(144.))
+                .h_9()
+                .px_3()
+                .label(caption)
+                .disabled(
+                    self.busy()
+                        || (matches!(field, ShortcutField::Copy | ShortcutField::Paste)
+                            && self.embedded_disabled()),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.busy()
+                        || (matches!(field, ShortcutField::Copy | ShortcutField::Paste)
+                            && this.embedded_disabled())
+                    {
+                        return;
+                    }
+                    this.recording = Some(field);
+                    this.error = None;
+                    window.focus(&this.shortcut_focus, cx);
+                    cx.notify();
+                })),
+        )
+    }
+
+    fn choose_terminal_program(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy() || self.draft.terminal.mode != TerminalMode::External {
+            return;
+        }
+        self.choosing_program = true;
+        self.error = None;
+        cx.notify();
+        let selection = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("选择外部终端程序".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = selection.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.choosing_program = false;
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(path) = paths.first() {
+                            if let Some(path) = path.to_str() {
+                                this.change(window, cx, |draft| {
+                                    draft.terminal.external_program = quote_program_path(path)
+                                });
+                                return;
+                            } else {
+                                this.error = Some("程序路径无法转换为文本".into());
+                            }
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => this.error = Some(format!("无法打开文件选择器：{error}")),
+                    Err(error) => this.error = Some(format!("文件选择未完成：{error}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn font_size_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let lower = *FONT_SIZE_RANGE.start();
+        let upper = *FONT_SIZE_RANGE.end();
+        let configured = self.draft.terminal.font_size;
+        let displayed_size = if configured.is_finite() {
+            configured.clamp(lower, upper)
+        } else {
+            DEFAULT_FONT_SIZE
+        };
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("terminal-font-decrease")
+                    .outline()
+                    .small()
+                    .label("−")
+                    .disabled(self.embedded_disabled() || displayed_size <= lower)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.embedded_disabled() {
+                            this.change(window, cx, |draft| {
+                                draft.terminal.font_size = (displayed_size - 1.).max(lower)
+                            });
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .min_w(px(60.))
+                    .text_center()
+                    .text_sm()
+                    .child(format!("{displayed_size} px")),
+            )
+            .child(
+                Button::new("terminal-font-increase")
+                    .outline()
+                    .small()
+                    .label("+")
+                    .disabled(self.embedded_disabled() || displayed_size >= upper)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.embedded_disabled() {
+                            this.change(window, cx, |draft| {
+                                draft.terminal.font_size = (displayed_size + 1.).min(upper)
+                            });
+                        }
+                    })),
+            )
     }
 
     fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -370,11 +621,10 @@ impl Preferences {
                     [(ViewMode::List, "列表"), (ViewMode::Grid, "网格")]
                         .into_iter()
                         .map(|(mode, label)| {
-                            preference_choice(label, label, self.view.view_mode == mode, cx)
-                                .disabled(self.saving)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.view.view_mode = mode;
-                                    cx.notify();
+                            preference_choice(label, label, self.draft.view.view_mode == mode, cx)
+                                .disabled(self.busy())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.change(window, cx, |draft| draft.view.view_mode = mode);
                                 }))
                         }),
                 ),
@@ -388,11 +638,10 @@ impl Preferences {
                     } else {
                         0x454340
                     }))
-                    .checked(self.view.show_hidden_files)
-                    .disabled(self.saving)
-                    .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                        this.view.show_hidden_files = *checked;
-                        cx.notify();
+                    .checked(self.draft.view.show_hidden_files)
+                    .disabled(self.busy())
+                    .on_change(cx.listener(|this, checked: &bool, window, cx| {
+                        this.change(window, cx, |draft| draft.view.show_hidden_files = *checked);
                     })),
             ))
     }
@@ -423,11 +672,10 @@ impl Preferences {
                     ]
                     .into_iter()
                     .map(|(id, label, action)| {
-                        preference_choice(id, label, self.blank_double_click == action, cx)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.blank_double_click = action;
-                                cx.notify();
+                        preference_choice(id, label, self.draft.blank_double_click == action, cx)
+                            .disabled(self.busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.change(window, cx, |draft| draft.blank_double_click = action);
                             }))
                     }),
                 ),
@@ -443,11 +691,10 @@ impl Preferences {
                     ]
                     .into_iter()
                     .map(|(id, label, action)| {
-                        preference_choice(id, label, self.middle_click_tab == action, cx)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.middle_click_tab = action;
-                                cx.notify();
+                        preference_choice(id, label, self.draft.middle_click_tab == action, cx)
+                            .disabled(self.busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.change(window, cx, |draft| draft.middle_click_tab = action);
                             }))
                     }),
                 ),
@@ -475,11 +722,10 @@ impl Preferences {
                     ]
                     .into_iter()
                     .map(|(id, label, action)| {
-                        preference_choice(id, label, self.middle_click_folder == action, cx)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.middle_click_folder = action;
-                                cx.notify();
+                        preference_choice(id, label, self.draft.middle_click_folder == action, cx)
+                            .disabled(self.busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.change(window, cx, |draft| draft.middle_click_folder = action);
                             }))
                     }),
                 ),
@@ -490,46 +736,116 @@ impl Preferences {
         v_flex()
             .gap_3()
             .child(preference_row(
-                "外部终端程序",
-                div()
-                    .w(px(290.))
-                    .child(Input::new(&self.external_program).disabled(self.saving)),
+                "快捷键打开",
+                preference_segments(
+                    cx,
+                    [
+                        ("embedded-terminal", "内置终端", TerminalMode::Embedded),
+                        ("external-terminal", "外部终端", TerminalMode::External),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, mode)| {
+                        preference_choice(id, label, self.draft.terminal.mode == mode, cx)
+                            .disabled(self.busy())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.change(window, cx, |draft| draft.terminal.mode = mode);
+                            }))
+                    }),
+                ),
             ))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("可填写程序名或绝对路径，支持带参数，例如 kitty --single-instance。留空自动探测。"),
-            )
+            .child(preference_row(
+                "光标形状",
+                preference_segments(
+                    cx,
+                    [
+                        ("terminal-cursor-block", "方块", TerminalCursorShape::Block),
+                        ("terminal-cursor-beam", "竖线", TerminalCursorShape::Beam),
+                        (
+                            "terminal-cursor-underline",
+                            "下划线",
+                            TerminalCursorShape::Underline,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(id, label, shape)| {
+                        preference_choice(id, label, self.draft.terminal.cursor_shape == shape, cx)
+                            .disabled(self.embedded_disabled())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if !this.embedded_disabled() {
+                                    this.change(window, cx, |draft| {
+                                        draft.terminal.cursor_shape = shape
+                                    });
+                                }
+                            }))
+                    }),
+                ),
+            ))
+            .child(preference_row(
+                "背景颜色",
+                div().w(px(176.)).child(
+                    Input::new(&self.terminal_background).disabled(self.embedded_disabled()),
+                ),
+            ))
+            .child(preference_row("字号", self.font_size_control(cx)))
+            .child(self.shortcut_row(ShortcutField::Copy, &self.draft.terminal.copy_shortcut, cx))
+            .child(self.shortcut_row(
+                ShortcutField::Paste,
+                &self.draft.terminal.paste_shortcut,
+                cx,
+            ))
+            .child(self.external_program_row(cx))
     }
 
-    fn shortcuts_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
+    fn external_program_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let program = &self.draft.terminal.external_program;
+        let disabled = self.busy() || self.draft.terminal.mode != TerminalMode::External;
+        let automatic = program.is_empty();
+        let program_path = sys::opener::split_command(program).map(|(name, _)| name);
+        let modes = preference_segments(
+            cx,
+            [
+                preference_choice("automatic-terminal-program", "自动探测", automatic, cx)
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.draft.terminal.mode == TerminalMode::External {
+                            this.change(window, cx, |draft| {
+                                draft.terminal.external_program.clear()
+                            });
+                        }
+                    })),
+                preference_choice("browse-terminal-program", "指定程序…", !automatic, cx)
+                    .disabled(disabled)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.choose_terminal_program(window, cx);
+                    })),
+            ],
+        );
+        v_flex()
+            .gap_1()
+            .child(preference_row("外部终端程序", modes))
+            .when_some(program_path, |row, path| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_right()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(path),
+                )
+            })
+    }
+
+    fn shortcuts_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         v_flex()
             .gap_3()
-            .child(preference_row(
-                "新建标签页",
-                div()
-                    .w(px(176.))
-                    .child(Input::new(&self.new_tab).disabled(self.saving)),
+            .child(self.shortcut_row(ShortcutField::NewTab, &self.draft.shortcuts.new_tab, cx))
+            .child(self.shortcut_row(ShortcutField::CloseTab, &self.draft.shortcuts.close_tab, cx))
+            .child(self.shortcut_row(
+                ShortcutField::OpenTerminal,
+                &self.draft.shortcuts.open_terminal,
+                cx,
             ))
-            .child(preference_row(
-                "关闭标签页",
-                div()
-                    .w(px(176.))
-                    .child(Input::new(&self.close_tab).disabled(self.saving)),
-            ))
-            .child(preference_row(
-                "打开终端",
-                div()
-                    .w(px(176.))
-                    .child(Input::new(&self.open_terminal).disabled(self.saving)),
-            ))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("使用 Ctrl、Alt 或 Super 组合键，例如 ctrl-shift-t。"),
-            )
     }
 
     fn about_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
@@ -585,12 +901,19 @@ impl Render for Preferences {
                 frame.border_1().border_color(palette.border)
             })
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(Self::record_shortcut))
             .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     window.remove_window();
                     cx.stop_propagation();
                 }
             }))
+            .child(
+                div()
+                    .id("shortcut-recorder-focus")
+                    .absolute()
+                    .track_focus(&self.shortcut_focus),
+            )
             .child(preferences_title_bar(
                 radius,
                 PREFERENCES_SIDEBAR_WIDTH,
@@ -618,41 +941,25 @@ impl Render for Preferences {
                                     .child(content)
                                     .overflow_y_scrollbar(),
                             )
-                            .child(
-                                v_flex()
-                                    .flex_shrink_0()
-                                    .px_6()
-                                    .py_3()
-                                    .gap_2()
-                                    .border_t_1()
-                                    .border_color(palette.border)
-                                    .when_some(self.error.clone(), |footer, error| {
-                                        footer
-                                            .child(div().text_sm().text_color(danger).child(error))
-                                    })
-                                    .child(
-                                        h_flex()
-                                            .justify_end()
-                                            .gap_2()
-                                            .child(
-                                                Button::new("cancel-preferences")
-                                                    .ghost()
-                                                    .label("取消")
-                                                    .on_click(|_, window, _| {
-                                                        window.remove_window()
-                                                    }),
-                                            )
-                                            .child(
-                                                Button::new("save-preferences")
-                                                    .primary()
-                                                    .disabled(self.saving)
-                                                    .label("保存")
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| this.save(window, cx),
-                                                    )),
-                                            ),
-                                    ),
-                            ),
+                            .when(self.saving || self.error.is_some(), |panel| {
+                                let message =
+                                    self.error.clone().unwrap_or_else(|| "正在保存…".into());
+                                panel.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_6()
+                                        .py_3()
+                                        .border_t_1()
+                                        .border_color(palette.border)
+                                        .text_sm()
+                                        .text_color(if self.error.is_some() {
+                                            danger
+                                        } else {
+                                            foreground
+                                        })
+                                        .child(message),
+                                )
+                            }),
                     ),
             )
             .when(
@@ -722,6 +1029,7 @@ fn preference_choice(
 fn preference_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
     h_flex()
         .min_h_10()
+        .items_center()
         .justify_between()
         .gap_3()
         .child(div().text_sm().child(label))
@@ -740,11 +1048,8 @@ pub(super) fn shortcut_bindings(
     ])
 }
 
-fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
-    // 后台线程拿不到 cx，用编译期目标推断操作系统：
-    // gpui 0.10 起 Keystroke::parse 只收 &'static str，动态字符串
-    // （配置文件里的值）改走 parse_with_os。
-    let os = if cfg!(target_os = "macos") {
+fn shortcut_os() -> OperatingSystem {
+    if cfg!(target_os = "macos") {
         OperatingSystem::Mac
     } else if cfg!(target_os = "windows") {
         OperatingSystem::Windows
@@ -752,18 +1057,38 @@ fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
         OperatingSystem::FreeBsd
     } else {
         OperatingSystem::Linux
-    };
-    let parse = |value: &str, label: &str| {
-        let key = Keystroke::parse_with_os(value, os)
-            .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
-        if value.split_whitespace().count() != 1
-            || key.key.is_empty()
-            || !(key.modifiers.control || key.modifiers.alt || key.modifiers.platform)
-        {
-            return Err(format!("{label}需要一个包含 Ctrl、Alt 或 Super 的组合键"));
-        }
-        Ok(key)
-    };
+    }
+}
+
+fn quote_program_path(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+pub(super) fn parse_shortcut(value: &str, label: &str) -> Result<Keystroke, String> {
+    let key = Keystroke::parse_with_os(value, shortcut_os())
+        .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
+    if value.split_whitespace().count() != 1
+        || key.key.is_empty()
+        || key.key_char.is_some()
+        || !(key.modifiers.control || key.modifiers.alt || key.modifiers.platform)
+    {
+        return Err(format!("{label}需要一个包含 Ctrl、Alt 或 Super 的组合键"));
+    }
+    Ok(key)
+}
+
+fn validate_terminal_shortcuts(config: &AppConfig) -> Result<(), String> {
+    let copy = parse_shortcut(&config.terminal.copy_shortcut, "内置终端复制")?;
+    let paste = parse_shortcut(&config.terminal.paste_shortcut, "内置终端粘贴")?;
+    let open = parse_shortcut(&config.shortcuts.open_terminal, "打开终端")?;
+    if copy == paste || copy == open || paste == open {
+        return Err("打开终端、内置终端复制和粘贴需要使用不同的快捷键".into());
+    }
+    Ok(())
+}
+
+fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
+    let parse = parse_shortcut;
     let new = parse(&shortcuts.new_tab, "新建标签页")?;
     let close = parse(&shortcuts.close_tab, "关闭标签页")?;
     let terminal = parse(&shortcuts.open_terminal, "打开终端")?;
@@ -804,8 +1129,28 @@ fn key_binding(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, BlankDoubleClickAction, PreferenceValues, ShortcutConfig, ViewConfig, ViewMode,
+        AppConfig, BlankDoubleClickAction, Keystroke, PreferenceValues, ShortcutConfig, ViewConfig,
+        ViewMode, parse_shortcut, quote_program_path, shortcut_os,
     };
+
+    #[test]
+    fn recorded_shortcuts_round_trip_with_modifiers() {
+        for source in ["ctrl-shift-c", "alt-f12", "super-v", "ctrl-`"] {
+            let event = Keystroke::parse_with_os(source, shortcut_os()).unwrap();
+            let stored = event.unparse(shortcut_os());
+            assert_eq!(parse_shortcut(&stored, "测试").unwrap(), event);
+        }
+    }
+
+    #[test]
+    fn selected_program_paths_round_trip_through_command_parser() {
+        let path = "/opt/Terminal's files/term\name";
+        let command = quote_program_path(path);
+        assert_eq!(
+            sys::opener::split_command(&command),
+            Some((path.to_owned(), vec![]))
+        );
+    }
 
     #[test]
     fn preference_draft_does_not_overwrite_unedited_fields() {

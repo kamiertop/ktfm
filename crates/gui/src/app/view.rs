@@ -10,6 +10,7 @@ use settings::config::{
 
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
 use super::browser::Browser;
+use super::embed_terminal::TerminalResize;
 use super::external_terminal::OpenTerminal;
 use super::file_operations::{DirectoryProperties, FileNameEditor, FileOperations};
 use super::io_queue::IoQueue;
@@ -248,7 +249,9 @@ impl Render for App {
             .key_context("FileManager")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::handle_file_key))
-            .on_action(cx.listener(|this, _: &OpenTerminal, _, cx| this.toggle_terminal(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenTerminal, window, cx| this.toggle_terminal(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &OpenPreferences, _, cx| this.open_preferences(cx)))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 if this.file_name_editor.is_none() && this.directory_properties.is_none() {
@@ -260,6 +263,7 @@ impl Render for App {
                     this.close_tab(this.active_tab, window, cx);
                 }
             }))
+            .on_drag_move::<TerminalResize>(cx.listener(Self::resize_embedded_terminal))
             .relative()
             .size_full()
             .rounded(radius)
@@ -285,7 +289,8 @@ impl Render for App {
                             .when_some(self.tag_editor.as_ref(), |panel, editor| {
                                 panel.child(self.tag_form(editor, cx))
                             })
-                            .child(self.file_area(window, cx)),
+                            .child(self.file_area(window, cx))
+                            .children(self.embedded_terminal_panel(window)),
                     ),
             )
             .when(

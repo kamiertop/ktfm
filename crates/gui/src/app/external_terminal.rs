@@ -5,16 +5,25 @@ use std::path::PathBuf;
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
+use settings::config::terminal::TerminalMode;
 
 use super::{App, preferences::ActivePreferences};
 
 actions!(browser, [OpenTerminal]);
 
 impl App {
-    /// 快捷键入口：在当前目录打开外部终端。
-    /// 内嵌终端已移除，待重新实现后此处再按配置分派。
-    pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
-        // 启动外部进程不与界面模态（重命名、属性）争抢焦点，无需守卫。
+    /// 根据配置打开当前标签页的内嵌终端或启动外部终端。
+    pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if cx.global::<ActivePreferences>().0.terminal.mode == TerminalMode::Embedded {
+            if self.file_name_editor.is_none()
+                && self.directory_properties.is_none()
+                && self.bookmark_rename.is_none()
+                && self.bookmark_properties.is_none()
+            {
+                self.toggle_embedded_terminal(window, cx);
+            }
+            return;
+        }
         if let Some(directory) = self.location().map(ToOwned::to_owned) {
             self.open_external_terminal(directory, cx);
         }

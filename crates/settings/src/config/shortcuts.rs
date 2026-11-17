@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 文件管理器快捷键，使用 GPUI 的按键格式存储。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutConfig {
     pub new_tab: String,

@@ -2,6 +2,7 @@ mod bookmark_menu;
 mod bookmarks;
 mod breadcrumb;
 mod browser;
+mod embed_terminal;
 mod external_terminal;
 mod file_area;
 mod file_item_actions;

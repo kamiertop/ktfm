@@ -23,7 +23,8 @@ const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
 actions!(browser, [NewTab, CloseTab]);
 
 pub(super) struct BrowserTab {
-    id: Uuid,
+    pub(super) id: Uuid,
+    pub(super) terminal: super::embed_terminal::TabTerminal,
     history: Vec<Location>,
     index: usize,
 }
@@ -32,6 +33,7 @@ impl BrowserTab {
     pub(super) fn new(id: Uuid, location: Option<Location>) -> Self {
         Self {
             id,
+            terminal: Default::default(),
             history: location.into_iter().collect(),
             index: 0,
         }
@@ -153,12 +155,14 @@ impl App {
     ) {
         self.tabs.push(BrowserTab::new(Uuid::new_v4(), location));
         self.active_tab = self.tabs.len() - 1;
+        window.focus(&self.focus, cx);
         self.location_changed(window, cx);
     }
 
     fn switch_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active_tab {
             self.active_tab = index;
+            window.focus(&self.focus, cx);
             self.location_changed(window, cx);
         }
     }
@@ -171,6 +175,7 @@ impl App {
         match index.cmp(&self.active_tab) {
             std::cmp::Ordering::Equal => {
                 self.active_tab = index.min(self.tabs.len() - 1);
+                window.focus(&self.focus, cx);
                 self.location_changed(window, cx);
                 return;
             }
