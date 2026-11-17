@@ -66,7 +66,7 @@ impl App {
             .child(with_tooltip(
                 icon_button("refresh", IconName::RefreshCw, "刷新")
                     .disabled(self.current_location().is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.load_directory(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_directory(cx))),
                 "刷新",
             ))
             .child(with_tooltip(

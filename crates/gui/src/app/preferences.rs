@@ -21,14 +21,13 @@ use settings::config::{
 
 use super::App;
 use super::embed_terminal::parse_background;
-use super::external_terminal::OpenTerminal;
 use super::io_queue::IoQueue;
-use super::tabs::{CloseTab, NewTab};
+use super::keymap::{
+    SHORTCUTS, ShortcutScope, bind_all, parse_shortcut, shortcut_os, unbind_all, validate,
+};
 use super::window_resize;
 use crate::components::preferences_title_bar;
 use crate::style::{APP_ID, WINDOW_RADIUS, preferences_palette};
-
-actions!(browser, [OpenPreferences]);
 
 pub(super) struct ActivePreferences(pub AppConfig);
 
@@ -89,27 +88,26 @@ impl From<&AppConfig> for PreferenceValues {
 }
 
 impl PreferenceValues {
+    /// 把草稿中用户改过的字段合并进磁盘配置。
+    ///
+    /// 只写草稿与基线的差异：保存前其他进程写入的新值不会被打开
+    /// 设置窗口时的旧快照覆盖。快捷键逐字段比较由 `SHORTCUTS`
+    /// 注册表驱动，新增字段无需改这里。
     fn merge_into(self, baseline: Self, config: &mut AppConfig) {
-        if self.shortcuts.new_tab != baseline.shortcuts.new_tab {
-            config.shortcuts.new_tab = self.shortcuts.new_tab;
-        }
-        if self.shortcuts.close_tab != baseline.shortcuts.close_tab {
-            config.shortcuts.close_tab = self.shortcuts.close_tab;
-        }
-        if self.shortcuts.open_terminal != baseline.shortcuts.open_terminal {
-            config.shortcuts.open_terminal = self.shortcuts.open_terminal;
+        for entry in SHORTCUTS {
+            let (draft, base) = (
+                (entry.get)(&self.shortcuts),
+                (entry.get)(&baseline.shortcuts),
+            );
+            if draft != base {
+                *(entry.get_mut)(&mut config.shortcuts) = draft.to_owned();
+            }
         }
         if self.terminal.mode != baseline.terminal.mode {
             config.terminal.mode = self.terminal.mode;
         }
         if self.terminal.external_program != baseline.terminal.external_program {
             config.terminal.external_program = self.terminal.external_program;
-        }
-        if self.terminal.copy_shortcut != baseline.terminal.copy_shortcut {
-            config.terminal.copy_shortcut = self.terminal.copy_shortcut;
-        }
-        if self.terminal.paste_shortcut != baseline.terminal.paste_shortcut {
-            config.terminal.paste_shortcut = self.terminal.paste_shortcut;
         }
         if self.terminal.background != baseline.terminal.background {
             config.terminal.background = self.terminal.background;
@@ -126,6 +124,9 @@ impl PreferenceValues {
         if self.view.show_hidden_files != baseline.view.show_hidden_files {
             config.view.show_hidden_files = self.view.show_hidden_files;
         }
+        if self.view.remember_tab_state != baseline.view.remember_tab_state {
+            config.view.remember_tab_state = self.view.remember_tab_state;
+        }
         if self.blank_double_click != baseline.blank_double_click {
             config.actions.blank_double_click = self.blank_double_click;
         }
@@ -138,27 +139,6 @@ impl PreferenceValues {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ShortcutField {
-    NewTab,
-    CloseTab,
-    OpenTerminal,
-    Copy,
-    Paste,
-}
-
-impl ShortcutField {
-    fn label(self) -> &'static str {
-        match self {
-            Self::NewTab => "新建标签页",
-            Self::CloseTab => "关闭标签页",
-            Self::OpenTerminal => "打开终端",
-            Self::Copy => "内置终端复制",
-            Self::Paste => "内置终端粘贴",
-        }
-    }
-}
-
 /// 设置窗口持有自己的草稿，只有保存成功才更新文件管理器。
 pub(super) struct Preferences {
     owner: WeakEntity<App>,
@@ -167,7 +147,8 @@ pub(super) struct Preferences {
     focus: FocusHandle,
     page: Page,
     draft: PreferenceValues,
-    recording: Option<ShortcutField>,
+    /// 正在录制的快捷键，指向 `keymap::SHORTCUTS` 的下标。
+    recording: Option<usize>,
     shortcut_focus: FocusHandle,
     choosing_program: bool,
     terminal_background: Entity<InputState>,
@@ -267,20 +248,12 @@ impl App {
 }
 
 fn install_preferences(config: AppConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
-    let old = &cx.global::<ActivePreferences>().0.shortcuts;
-    if config.shortcuts != *old {
-        let bindings = shortcut_bindings(&config.shortcuts, cx)?;
-        let unbind = [
-            key_binding(&old.new_tab, Unbind(NewTab.name().into()), false, cx)?,
-            key_binding(&old.close_tab, Unbind(CloseTab.name().into()), false, cx)?,
-            key_binding(
-                &old.open_terminal,
-                Unbind(OpenTerminal.name().into()),
-                true,
-                cx,
-            )?,
-        ];
-        cx.bind_keys(unbind.into_iter().chain(bindings));
+    if config.shortcuts != cx.global::<ActivePreferences>().0.shortcuts {
+        // 先解绑旧键再绑新键，避免同一动作同时挂着两个键。
+        // 保存流程已整体校验过，这里失败只可能是环境异常。
+        let old = cx.global::<ActivePreferences>().0.shortcuts.clone();
+        unbind_all(&old, cx);
+        bind_all(&config.shortcuts, cx)?;
     }
     cx.set_global(ActivePreferences(config));
     Ok(())
@@ -335,15 +308,11 @@ impl Preferences {
                 {
                     return Err(settings::Error::InvalidExternalTerminal(program.clone()));
                 }
-                let check_shortcuts = draft.shortcuts != baseline.shortcuts
-                    || draft.terminal.copy_shortcut != baseline.terminal.copy_shortcut
-                    || draft.terminal.paste_shortcut != baseline.terminal.paste_shortcut;
+                let check_shortcuts = draft.shortcuts != baseline.shortcuts;
                 AppConfig::update_file(|config| {
                     draft.merge_into(baseline, config);
                     if check_shortcuts {
-                        validate_shortcuts(&config.shortcuts)
-                            .and_then(|()| validate_terminal_shortcuts(config))
-                            .map_err(settings::Error::InvalidShortcuts)?;
+                        validate(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)?;
                     }
                     Ok(())
                 })
@@ -390,23 +359,16 @@ impl Preferences {
         cx.notify();
     }
 
-    fn shortcut_value(&mut self, field: ShortcutField) -> &mut String {
-        match field {
-            ShortcutField::NewTab => &mut self.draft.shortcuts.new_tab,
-            ShortcutField::CloseTab => &mut self.draft.shortcuts.close_tab,
-            ShortcutField::OpenTerminal => &mut self.draft.shortcuts.open_terminal,
-            ShortcutField::Copy => &mut self.draft.terminal.copy_shortcut,
-            ShortcutField::Paste => &mut self.draft.terminal.paste_shortcut,
-        }
-    }
-
     fn record_shortcut(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(field) = self.recording else { return };
+        let Some(index) = self.recording else { return };
+        let Some(entry) = SHORTCUTS.get(index) else {
+            return;
+        };
         if !self.shortcut_focus.is_focused(window) {
             return;
         }
@@ -418,14 +380,21 @@ impl Preferences {
         if key.key == "escape" && !key.modifiers.modified() {
             self.recording = None;
             self.error = None;
+        } else if key.key == "backspace" && !key.modifiers.modified() {
+            // 退格清除绑定，空串即未绑定。
+            *((entry.get_mut)(&mut self.draft.shortcuts)) = String::new();
+            self.recording = None;
+            window.focus(&self.focus, cx);
+            self.save(window, cx);
+            return;
         } else {
             let value = key.unparse(shortcut_os());
-            if let Err(error) = parse_shortcut(&value, field.label()) {
+            if let Err(error) = parse_shortcut(&value, entry.label) {
                 self.error = Some(error);
                 cx.notify();
                 return;
             }
-            *self.shortcut_value(field) = value;
+            *((entry.get_mut)(&mut self.draft.shortcuts)) = value;
             self.recording = None;
             window.focus(&self.focus, cx);
             self.save(window, cx);
@@ -435,17 +404,16 @@ impl Preferences {
         cx.notify();
     }
 
-    fn shortcut_row(
-        &self,
-        field: ShortcutField,
-        value: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let recording = self.recording == Some(field);
+    fn shortcut_row(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let entry = &SHORTCUTS[index];
+        let value = (entry.get)(&self.draft.shortcuts);
+        let recording = self.recording == Some(index);
         let caption = if recording {
-            "按键（esc 取消）".to_owned()
+            "按键（esc 取消，退格清除）".to_owned()
+        } else if value.trim().is_empty() {
+            "未绑定".to_owned()
         } else {
-            parse_shortcut(value, field.label()).map_or_else(
+            parse_shortcut(value, entry.label).map_or_else(
                 |_| value.to_lowercase(),
                 |key| {
                     let binding = key.unparse(shortcut_os());
@@ -455,8 +423,8 @@ impl Preferences {
             )
         };
         preference_row(
-            field.label(),
-            Button::new(field.label())
+            entry.label,
+            Button::new(entry.label)
                 .outline()
                 .w(px(144.))
                 .h_9()
@@ -464,17 +432,16 @@ impl Preferences {
                 .label(caption)
                 .disabled(
                     self.busy()
-                        || (matches!(field, ShortcutField::Copy | ShortcutField::Paste)
-                            && self.embedded_disabled()),
+                        || (entry.scope == ShortcutScope::Terminal && self.embedded_disabled()),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if this.busy()
-                        || (matches!(field, ShortcutField::Copy | ShortcutField::Paste)
+                        || (SHORTCUTS[index].scope == ShortcutScope::Terminal
                             && this.embedded_disabled())
                     {
                         return;
                     }
-                    this.recording = Some(field);
+                    this.recording = Some(index);
                     this.error = None;
                     window.focus(&this.shortcut_focus, cx);
                     cx.notify();
@@ -629,21 +596,45 @@ impl Preferences {
                         }),
                 ),
             ))
-            .child(preference_row(
+            .child(self.view_switch(
+                "hidden-files",
                 "显示隐藏文件",
-                Switch::new("hidden-files")
-                    .accessibility_label("显示隐藏文件")
-                    .color(rgb(if cx.theme().mode.is_dark() {
-                        0x767676
-                    } else {
-                        0x454340
-                    }))
-                    .checked(self.draft.view.show_hidden_files)
-                    .disabled(self.busy())
-                    .on_change(cx.listener(|this, checked: &bool, window, cx| {
-                        this.change(window, cx, |draft| draft.view.show_hidden_files = *checked);
-                    })),
+                self.draft.view.show_hidden_files,
+                |view, checked| view.show_hidden_files = checked,
+                cx,
             ))
+            .child(self.view_switch(
+                "remember-tab-state",
+                "切换标签页时保留浏览状态",
+                self.draft.view.remember_tab_state,
+                |view, checked| view.remember_tab_state = checked,
+                cx,
+            ))
+    }
+
+    fn view_switch(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        checked: bool,
+        update: fn(&mut ViewConfig, bool),
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        preference_row(
+            label,
+            Switch::new(id)
+                .accessibility_label(label)
+                .color(rgb(if cx.theme().mode.is_dark() {
+                    0x767676
+                } else {
+                    0x454340
+                }))
+                .checked(checked)
+                .disabled(self.busy())
+                .on_change(cx.listener(move |this, checked: &bool, window, cx| {
+                    this.change(window, cx, |draft| update(&mut draft.view, *checked));
+                })),
+        )
     }
 
     fn behavior_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -787,12 +778,13 @@ impl Preferences {
                 ),
             ))
             .child(preference_row("字号", self.font_size_control(cx)))
-            .child(self.shortcut_row(ShortcutField::Copy, &self.draft.terminal.copy_shortcut, cx))
-            .child(self.shortcut_row(
-                ShortcutField::Paste,
-                &self.draft.terminal.paste_shortcut,
-                cx,
-            ))
+            .children(
+                SHORTCUTS
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.scope == ShortcutScope::Terminal)
+                    .map(|(index, _)| self.shortcut_row(index, cx)),
+            )
             .child(self.external_program_row(cx))
     }
 
@@ -837,15 +829,13 @@ impl Preferences {
     }
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        v_flex()
-            .gap_3()
-            .child(self.shortcut_row(ShortcutField::NewTab, &self.draft.shortcuts.new_tab, cx))
-            .child(self.shortcut_row(ShortcutField::CloseTab, &self.draft.shortcuts.close_tab, cx))
-            .child(self.shortcut_row(
-                ShortcutField::OpenTerminal,
-                &self.draft.shortcuts.open_terminal,
-                cx,
-            ))
+        v_flex().gap_3().children(
+            SHORTCUTS
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.scope != ShortcutScope::Terminal)
+                .map(|(index, _)| self.shortcut_row(index, cx)),
+        )
     }
 
     fn about_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
@@ -1036,101 +1026,16 @@ fn preference_row(label: &'static str, control: impl IntoElement) -> impl IntoEl
         .child(control)
 }
 
-pub(super) fn shortcut_bindings(
-    shortcuts: &ShortcutConfig,
-    cx: &gpui_kit::App,
-) -> Result<[KeyBinding; 3], String> {
-    validate_shortcuts(shortcuts)?;
-    Ok([
-        key_binding(&shortcuts.new_tab, NewTab, false, cx)?,
-        key_binding(&shortcuts.close_tab, CloseTab, false, cx)?,
-        key_binding(&shortcuts.open_terminal, OpenTerminal, true, cx)?,
-    ])
-}
-
-fn shortcut_os() -> OperatingSystem {
-    if cfg!(target_os = "macos") {
-        OperatingSystem::Mac
-    } else if cfg!(target_os = "windows") {
-        OperatingSystem::Windows
-    } else if cfg!(target_os = "freebsd") {
-        OperatingSystem::FreeBsd
-    } else {
-        OperatingSystem::Linux
-    }
-}
-
 fn quote_program_path(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }
 
-pub(super) fn parse_shortcut(value: &str, label: &str) -> Result<Keystroke, String> {
-    let key = Keystroke::parse_with_os(value, shortcut_os())
-        .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
-    if value.split_whitespace().count() != 1
-        || key.key.is_empty()
-        || key.key_char.is_some()
-        || !(key.modifiers.control || key.modifiers.alt || key.modifiers.platform)
-    {
-        return Err(format!("{label}需要一个包含 Ctrl、Alt 或 Super 的组合键"));
-    }
-    Ok(key)
-}
-
-fn validate_terminal_shortcuts(config: &AppConfig) -> Result<(), String> {
-    let copy = parse_shortcut(&config.terminal.copy_shortcut, "内置终端复制")?;
-    let paste = parse_shortcut(&config.terminal.paste_shortcut, "内置终端粘贴")?;
-    let open = parse_shortcut(&config.shortcuts.open_terminal, "打开终端")?;
-    if copy == paste || copy == open || paste == open {
-        return Err("打开终端、内置终端复制和粘贴需要使用不同的快捷键".into());
-    }
-    Ok(())
-}
-
-fn validate_shortcuts(shortcuts: &ShortcutConfig) -> Result<(), String> {
-    let parse = parse_shortcut;
-    let new = parse(&shortcuts.new_tab, "新建标签页")?;
-    let close = parse(&shortcuts.close_tab, "关闭标签页")?;
-    let terminal = parse(&shortcuts.open_terminal, "打开终端")?;
-    let preferences = parse("ctrl-p", "偏好设置")?;
-    if new == preferences || close == preferences || terminal == preferences {
-        return Err("Ctrl+P 已用于打开偏好设置".into());
-    }
-    if new == close || terminal == new || terminal == close {
-        return Err("两个操作不能使用相同的快捷键".into());
-    }
-    Ok(())
-}
-
-fn key_binding(
-    value: &str,
-    action: impl Action,
-    in_terminal: bool,
-    cx: &gpui_kit::App,
-) -> Result<KeyBinding, String> {
-    let context = if in_terminal {
-        "FileManager"
-    } else {
-        "FileManager && !EmbeddedTerminal"
-    };
-    let context = KeyBindingContextPredicate::parse(context).map_err(|error| error.to_string())?;
-    KeyBinding::load(
-        value,
-        Box::new(action),
-        Some(context.into()),
-        false,
-        None,
-        // gpui-kit 0.10 起 load 直接收 &App，内部自行解析键盘映射。
-        cx,
-    )
-    .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::keymap::{parse_shortcut, shortcut_os};
     use super::{
         AppConfig, BlankDoubleClickAction, Keystroke, PreferenceValues, ShortcutConfig, ViewConfig,
-        ViewMode, parse_shortcut, quote_program_path, shortcut_os,
+        ViewMode, quote_program_path,
     };
 
     #[test]

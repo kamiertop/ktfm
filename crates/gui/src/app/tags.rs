@@ -183,7 +183,7 @@ impl App {
             }
             TagChange::Paths(id) => {
                 if self.current_location() == Some(&Location::Tag { id }) {
-                    self.load_directory(cx);
+                    self.refresh_directory(cx);
                 }
             }
             TagChange::Removed(id) => {

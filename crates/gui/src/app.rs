@@ -8,6 +8,8 @@ mod file_area;
 mod file_item_actions;
 mod file_operations;
 mod io_queue;
+mod keymap;
+mod menu;
 mod preferences;
 mod sidebar;
 mod tabs;
@@ -19,6 +21,5 @@ mod volumes;
 mod window_resize;
 mod workspace;
 
-pub use file_operations::FileOperations;
-pub use preferences::OpenPreferences;
+pub use file_operations::FileJobs;
 pub use view::App;

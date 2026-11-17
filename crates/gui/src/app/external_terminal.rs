@@ -9,8 +9,6 @@ use settings::config::terminal::TerminalMode;
 
 use super::{App, preferences::ActivePreferences};
 
-actions!(browser, [OpenTerminal]);
-
 impl App {
     /// 根据配置打开当前标签页的内嵌终端或启动外部终端。
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

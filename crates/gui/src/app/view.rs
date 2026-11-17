@@ -11,11 +11,14 @@ use settings::config::{
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
 use super::browser::Browser;
 use super::embed_terminal::TerminalResize;
-use super::external_terminal::OpenTerminal;
-use super::file_operations::{DirectoryProperties, FileNameEditor, FileOperations};
+use super::file_operations::{
+    DirectoryProperties, FileAction, FileClipboard, FileJobs, FileNameEditor,
+};
 use super::io_queue::IoQueue;
-use super::preferences::{ActivePreferences, OpenPreferences, Preferences, shortcut_bindings};
-use super::tabs::{BrowserTab, CloseTab, NewTab, restore_tabs};
+use super::keymap;
+use super::keymap::{CloseTab, NewTab, OpenPreferences, OpenTerminal};
+use super::preferences::{ActivePreferences, Preferences};
+use super::tabs::{BrowserTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
 use super::volumes::{SharedStorage, StorageDevices};
 use super::workspace::WorkspaceWriter;
@@ -29,7 +32,7 @@ use settings::config::general::StartupBehavior;
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
     pub(super) focus: FocusHandle,
-    pub(super) file_job_running: bool,
+    pub(super) file_job: Option<daemon::job::JobKind>,
     pub(super) file_name_editor: Option<FileNameEditor>,
     pub(super) directory_properties: Option<DirectoryProperties>,
     pub(super) tabs: Vec<BrowserTab>,
@@ -58,7 +61,8 @@ impl Global for SharedTags {}
 
 impl App {
     pub fn open_main_window(cx: &mut gpui_kit::App) {
-        cx.set_global(FileOperations::default());
+        cx.set_global(FileClipboard::default());
+        cx.set_global(FileJobs::default());
         let writer = WorkspaceWriter::default();
         cx.set_global(writer.clone());
         match IoQueue::new() {
@@ -121,21 +125,11 @@ impl App {
                 eprintln!("无法加载配置：{error}");
                 AppConfig::default()
             });
-            match shortcut_bindings(&config.shortcuts, cx) {
-                Ok(bindings) => cx.bind_keys(bindings),
-                Err(error) => {
-                    eprintln!("无法加载快捷键：{error}");
-                    config.shortcuts = Default::default();
-                    cx.bind_keys([
-                        KeyBinding::new("ctrl-t", NewTab, Some("FileManager && !EmbeddedTerminal")),
-                        KeyBinding::new(
-                            "ctrl-w",
-                            CloseTab,
-                            Some("FileManager && !EmbeddedTerminal"),
-                        ),
-                        KeyBinding::new("ctrl-`", OpenTerminal, Some("FileManager")),
-                    ]);
-                }
+            if let Err(error) = keymap::bind_all(&config.shortcuts, cx) {
+                // 键位无效时退回默认配置，保证窗口按键始终可用。
+                eprintln!("无法加载快捷键：{error}");
+                config.shortcuts = Default::default();
+                let _ = keymap::bind_all(&config.shortcuts, cx);
             }
             cx.set_global(ActivePreferences(config));
         }
@@ -191,7 +185,7 @@ impl App {
         let view = &cx.global::<ActivePreferences>().0.view;
         let mut app = Self {
             focus,
-            file_job_running: false,
+            file_job: None,
             file_name_editor: None,
             directory_properties: None,
             tabs,
@@ -218,9 +212,14 @@ impl App {
             this.search_directory(query, cx);
         })
         .detach();
-        cx.observe_global::<ActivePreferences>(|_, cx| cx.notify())
-            .detach();
-        cx.observe_global::<FileOperations>(|_, cx| cx.notify())
+        cx.observe_global::<ActivePreferences>(|this, cx| {
+            if !cx.global::<ActivePreferences>().0.view.remember_tab_state {
+                this.clear_saved_tab_states();
+            }
+            cx.notify();
+        })
+        .detach();
+        cx.observe_global::<FileClipboard>(|_, cx| cx.notify())
             .detach();
         cx.observe(&app.bookmarks, |_, _, cx| cx.notify()).detach();
         if persist_session {
@@ -250,7 +249,9 @@ impl Render for App {
             .id("file-manager")
             .key_context("FileManager")
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::handle_file_key))
+            .on_action(cx.listener(|this, action: &FileAction, window, cx| {
+                this.file_shortcut(*action, window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenTerminal, window, cx| this.toggle_terminal(window, cx)),
             )

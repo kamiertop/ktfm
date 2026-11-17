@@ -1387,6 +1387,7 @@ name = "daemon"
 version = "0.1.0"
 dependencies = [
  "rustix 1.1.6",
+ "sys",
  "tempfile",
 ]
 
@@ -2941,6 +2942,7 @@ dependencies = [
  "directories",
  "gpui-kit",
  "hex_color",
+ "serde_json",
  "settings",
  "sys",
  "uuid",

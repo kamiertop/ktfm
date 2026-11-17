@@ -4,18 +4,17 @@ use gpui_kit::component::{
     menu::{PopupMenu, PopupMenuItem},
 };
 use gpui_kit::prelude::*;
-use gpui_kit::{Context, Pixels, SharedString, WeakEntity, Window, px};
+use gpui_kit::{Context, WeakEntity, Window};
 use settings::command::AppCommand;
 use settings::config::{bookmark::BookmarkKind, tab::Location};
 use vfs::EntryKind;
 
 use super::App;
 use super::browser::DirectoryState;
-use super::file_operations::FileAction;
+use super::file_operations::{FileAction, FileMenuTarget};
 use super::preferences::ActivePreferences;
 
-// 在组件默认间距上微调图标与文字的距离，正值加宽，负值收窄。
-pub(super) const MENU_ICON_EXTRA_GAP: Pixels = px(3.);
+use super::menu::{MENU_ICON_EXTRA_GAP, app_menu_item};
 
 impl App {
     pub(super) fn middle_click_folder(
@@ -73,9 +72,12 @@ impl App {
             }
         });
         let app = entity.read(cx);
-        let unavailable = app.file_job_running || kind == EntryKind::Missing;
-        let multiple = app.browser.selection.contains(&index) && app.browser.selection.len() > 1;
-        let target = Some((snapshot_revision, index));
+        let unavailable = app.file_job.is_some() || kind == EntryKind::Missing;
+        let multiple = app.browser.selection_len() > 1;
+        let target = FileMenuTarget {
+            navigation_revision: app.navigation_revision,
+            path: Some(path.clone()),
+        };
         let paste_target = (kind == EntryKind::Directory).then_some(index);
         let mut menu = [
             ("剪切", IconName::Scissors, FileAction::Cut, unavailable),
@@ -105,12 +107,14 @@ impl App {
         ]
         .into_iter()
         .fold(menu, |menu, (label, icon, action, disabled)| {
-            let entry = if matches!(action, FileAction::Paste) && paste_target.is_none() {
-                None
-            } else {
-                target
-            };
-            menu.item(file_menu_item(label, icon, action, entry, disabled, owner))
+            menu.item(file_menu_item(
+                label,
+                icon,
+                action,
+                target.clone(),
+                disabled,
+                owner,
+            ))
         });
         menu = menu.separator();
         if kind == EntryKind::Directory {
@@ -185,6 +189,10 @@ impl App {
         if !matches!(self.browser.state, DirectoryState::Ready(_)) {
             return menu;
         }
+        let target = FileMenuTarget {
+            navigation_revision: self.navigation_revision,
+            path: None,
+        };
         let directory = self.location();
         let mut menu = menu;
         if directory.is_some() {
@@ -196,8 +204,8 @@ impl App {
                     label,
                     icon,
                     action,
-                    None,
-                    self.file_job_running,
+                    target.clone(),
+                    self.file_job.is_some(),
                     owner,
                 ));
             }
@@ -207,7 +215,7 @@ impl App {
                 "全选",
                 IconName::ListChecks,
                 FileAction::SelectAll,
-                None,
+                target.clone(),
                 false,
                 owner,
             ));
@@ -217,7 +225,7 @@ impl App {
                 "粘贴",
                 IconName::ClipboardPaste,
                 FileAction::Paste,
-                None,
+                target.clone(),
                 false,
                 owner,
             ));
@@ -227,7 +235,7 @@ impl App {
                 "属性",
                 IconName::Info,
                 FileAction::Properties,
-                None,
+                target.clone(),
                 false,
                 owner,
             ));
@@ -237,22 +245,6 @@ impl App {
         }
         menu
     }
-}
-
-fn icon_menu_item(label: impl Into<SharedString>, icon: IconName) -> PopupMenuItem {
-    PopupMenuItem::new(label).icon(Icon::new(icon).mr(MENU_ICON_EXTRA_GAP))
-}
-
-fn app_menu_item(
-    owner: &WeakEntity<App>,
-    label: impl Into<SharedString>,
-    icon: IconName,
-    action: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
-) -> PopupMenuItem {
-    let owner = owner.clone();
-    icon_menu_item(label, icon).on_click(move |_, window, cx| {
-        let _ = owner.update(cx, |app, cx| action(app, window, cx));
-    })
 }
 
 fn external_terminal_item(path: std::path::PathBuf, owner: &WeakEntity<App>) -> PopupMenuItem {
@@ -270,12 +262,12 @@ fn file_menu_item(
     label: &'static str,
     icon: IconName,
     action: FileAction,
-    entry: Option<(u64, usize)>,
+    target: FileMenuTarget,
     disabled: bool,
     owner: &WeakEntity<App>,
 ) -> PopupMenuItem {
     app_menu_item(owner, label, icon, move |app, window, cx| {
-        app.file_action(action, entry, window, cx);
+        app.file_action(action, Some(&target), window, cx);
     })
     .disabled(disabled)
 }

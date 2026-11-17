@@ -15,15 +15,11 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use uuid::Uuid;
 
-use settings::config::terminal::{
-    DEFAULT_BACKGROUND, DEFAULT_COPY_SHORTCUT, DEFAULT_FONT_SIZE, DEFAULT_PASTE_SHORTCUT,
-    FONT_SIZE_RANGE,
-};
+use settings::config::terminal::{DEFAULT_BACKGROUND, DEFAULT_FONT_SIZE, FONT_SIZE_RANGE};
 
-use super::{
-    App,
-    preferences::{ActivePreferences, parse_shortcut},
-};
+use super::App;
+use super::keymap::{TerminalCopy, TerminalPaste};
+use super::preferences::ActivePreferences;
 use crate::model::home_directory;
 use display::Metrics;
 use session::Session;
@@ -262,36 +258,39 @@ impl TerminalView {
         }
     }
 
+    /// 复制选区。选区为空时不拦截按键，让 ctrl-c 等继续传给终端
+    /// 编码为中断信号。
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else { return };
+        let text = session.grid.lock().selection_to_string();
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.stop_propagation();
+        }
+    }
+
+    /// 粘贴剪贴板；会话已退出时只拦截按键不发送。
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else { return };
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            let mode = *session.grid.lock().mode();
+            let text = if mode.contains(TermMode::BRACKETED_PASTE) {
+                format!(
+                    "\x1b[200~{}\x1b[201~",
+                    text.replace(['\x1b', '\u{009b}'], "")
+                )
+            } else {
+                text.replace("\r\n", "\r").replace('\n', "\r")
+            };
+            self.send_input(text, cx);
+        }
+        cx.stop_propagation();
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         let modifiers = key.modifiers;
-        let Some(session) = &self.session else { return };
-        let config = &cx.global::<ActivePreferences>().0.terminal;
-        if modifiers.control || modifiers.alt || modifiers.platform {
-            if matches_shortcut(key, &config.copy_shortcut, DEFAULT_COPY_SHORTCUT) {
-                let text = session.grid.lock().selection_to_string();
-                if let Some(text) = text.filter(|text| !text.is_empty()) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    cx.stop_propagation();
-                    return;
-                }
-            } else if matches_shortcut(key, &config.paste_shortcut, DEFAULT_PASTE_SHORTCUT) {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let mode = *session.grid.lock().mode();
-                    let text = if mode.contains(TermMode::BRACKETED_PASTE) {
-                        format!(
-                            "\x1b[200~{}\x1b[201~",
-                            text.replace(['\x1b', '\u{009b}'], "")
-                        )
-                    } else {
-                        text.replace("\r\n", "\r").replace('\n', "\r")
-                    };
-                    self.send_input(text, cx);
-                }
-                cx.stop_propagation();
-                return;
-            }
-        }
+        let Some(session) = self.session.as_ref() else { return };
         if modifiers.platform || modifiers.function {
             return;
         }
@@ -347,6 +346,10 @@ impl Render for TerminalView {
             .overflow_hidden()
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(|this, _: &TerminalCopy, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &TerminalPaste, _, cx| {
+                this.paste_clipboard(cx)
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -478,12 +481,6 @@ impl Render for TerminalView {
     }
 }
 
-fn matches_shortcut(key: &Keystroke, value: &str, default: &str) -> bool {
-    parse_shortcut(value.trim(), "内置终端")
-        .or_else(|_| parse_shortcut(default, "内置终端"))
-        .is_ok_and(|binding| key.modifiers == binding.modifiers && key.key == binding.key)
-}
-
 fn terminal_key(key: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let modifiers = key.modifiers;
     let name = key.key.as_str();
@@ -575,31 +572,13 @@ fn terminal_key(key: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_COPY_SHORTCUT, DEFAULT_PASTE_SHORTCUT, matches_shortcut, terminal_key};
+    use super::terminal_key;
     use alacritty_terminal::term::TermMode;
     use gpui_kit::Keystroke;
 
     #[test]
-    fn clipboard_bindings_can_be_reassigned_and_control_c_encodes_interrupt() {
+    fn control_c_encodes_interrupt_for_the_terminal() {
         let control_c = Keystroke::parse("ctrl-c").unwrap();
-        let control_v = Keystroke::parse("ctrl-v").unwrap();
-        let alt_c = Keystroke::parse("alt-c").unwrap();
-        assert!(matches_shortcut(
-            &control_c,
-            "ctrl-c",
-            DEFAULT_COPY_SHORTCUT
-        ));
-        assert!(matches_shortcut(
-            &control_v,
-            "ctrl-v",
-            DEFAULT_PASTE_SHORTCUT
-        ));
-        assert!(matches_shortcut(&alt_c, "alt-c", DEFAULT_COPY_SHORTCUT));
-        assert!(!matches_shortcut(
-            &control_c,
-            "alt-c",
-            DEFAULT_COPY_SHORTCUT
-        ));
         assert_eq!(terminal_key(&control_c, TermMode::empty()), Some(vec![3]));
     }
 }

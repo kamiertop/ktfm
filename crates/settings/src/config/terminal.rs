@@ -6,9 +6,6 @@ pub const DEFAULT_BACKGROUND: &str = "#161A22";
 pub const DEFAULT_FONT_SIZE: f32 = 13.;
 pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 9.0..=28.0;
 
-pub const DEFAULT_COPY_SHORTCUT: &str = "ctrl-c";
-pub const DEFAULT_PASTE_SHORTCUT: &str = "ctrl-v";
-
 /// 终端配置根。
 ///
 /// f32 不实现 Eq（NaN 无全序语义），含它的配置结构只能 derive(PartialEq)，
@@ -29,10 +26,6 @@ pub struct TerminalConfig {
     pub background: String,
     /// 会话未指定光标样式时使用的形状。
     pub cursor_shape: TerminalCursorShape,
-    /// 内嵌终端选区复制快捷键。
-    pub copy_shortcut: String,
-    /// 内嵌终端剪贴板粘贴快捷键。
-    pub paste_shortcut: String,
 }
 
 // 默认值非类型自然默认（字号 13px、程序为空串走自动探测），
@@ -45,8 +38,6 @@ impl Default for TerminalConfig {
             font_size: DEFAULT_FONT_SIZE,
             background: DEFAULT_BACKGROUND.into(),
             cursor_shape: TerminalCursorShape::default(),
-            copy_shortcut: DEFAULT_COPY_SHORTCUT.into(),
-            paste_shortcut: DEFAULT_PASTE_SHORTCUT.into(),
         }
     }
 }

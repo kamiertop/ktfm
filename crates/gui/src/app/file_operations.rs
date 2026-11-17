@@ -2,7 +2,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use daemon::files;
+use daemon::{
+    files,
+    job::{FileJob, JobKind, JobResult},
+};
 use gpui_kit::base::{Dialog, Disableable as _};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -14,7 +17,9 @@ use vfs::EntryKind;
 use super::{App, browser::DirectoryState};
 use crate::components::popup_surface;
 
-#[derive(Clone, Copy)]
+/// 文件操作命令。既是右键菜单的载荷，也是键绑定的动作：
+/// 键盘与菜单共用 [`App::file_action`] 一个分发入口。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum FileAction {
     NewFolder,
     NewDocument,
@@ -27,69 +32,120 @@ pub(super) enum FileAction {
     Trash,
 }
 
+/// 手工实现 [`Action`]：动作名按变体区分，供 `Unbind` 按名解绑。
+/// 不支持从 JSON 构建（本应用不用 JSON 键位表）。
+impl Action for FileAction {
+    fn boxed_clone(&self) -> Box<dyn Action> {
+        Box::new(*self)
+    }
+
+    fn partial_eq(&self, action: &dyn Action) -> bool {
+        action
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other == self)
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Self::NewFolder => "file_manager::NewFolder",
+            Self::NewDocument => "file_manager::NewDocument",
+            Self::SelectAll => "file_manager::SelectAll",
+            Self::Properties => "file_manager::Properties",
+            Self::Rename => "file_manager::Rename",
+            Self::Cut => "file_manager::Cut",
+            Self::Copy => "file_manager::Copy",
+            Self::Paste => "file_manager::Paste",
+            Self::Trash => "file_manager::Trash",
+        }
+    }
+
+    fn name_for_type() -> &'static str {
+        "file_manager::FileAction"
+    }
+
+    fn build(_: serde_json::Value) -> gpui_kit::Result<Box<dyn Action>> {
+        Err(anyhow::anyhow!("FileAction 不支持按名称构建"))
+    }
+}
+
 #[derive(Default)]
-pub struct FileOperations {
+pub(super) struct FileClipboard {
     paths: Arc<[PathBuf]>,
     cut: bool,
     revision: u64,
     pasting: bool,
-    running: usize,
 }
 
-impl Global for FileOperations {}
+impl Global for FileClipboard {}
 
-impl FileOperations {
+impl FileClipboard {
     pub(super) fn pending_cut_paths(&self) -> &[PathBuf] {
         if self.cut { &self.paths } else { &[] }
     }
 
-    fn reconcile_cut(&mut self, outcome: &Outcome) {
-        if self.pending_cut_paths().is_empty() {
+    fn finish_job(&mut self, outcome: &JobResult, revision: u64) {
+        if matches!(outcome.kind, JobKind::Transfer { .. }) {
+            self.pasting = false;
+        }
+        if self.revision != revision || !self.cut {
             return;
         }
-
-        if let Some((source, target)) = &outcome.renamed {
-            let mut paths = self.paths.to_vec();
-            for path in &mut paths {
-                if let Ok(suffix) = path.strip_prefix(source) {
-                    *path = if suffix.as_os_str().is_empty() {
-                        target.clone()
-                    } else {
-                        target.join(suffix)
-                    };
+        let sources = outcome
+            .items
+            .iter()
+            .filter(|item| item.result.is_ok())
+            .filter_map(|item| Some((item.source.as_deref()?, item.target.as_deref())));
+        match outcome.kind {
+            JobKind::Rename => {
+                let mut sources = sources;
+                if let Some((source, Some(target))) = sources.next()
+                    && source != target
+                {
+                    self.paths = self
+                        .paths
+                        .iter()
+                        .map(|path| match path.strip_prefix(source) {
+                            Ok(suffix) if suffix.as_os_str().is_empty() => target.to_owned(),
+                            Ok(suffix) => target.join(suffix),
+                            Err(_) => path.clone(),
+                        })
+                        .collect();
                 }
             }
-            self.paths = paths.into();
-        }
-
-        if !outcome.trashed.is_empty() {
-            self.paths = self
-                .paths
-                .iter()
-                .filter(|path| {
-                    !outcome
-                        .trashed
-                        .iter()
-                        .any(|removed| path.starts_with(removed))
-                })
-                .cloned()
-                .collect();
-        }
-    }
-
-    fn finish_paste(&mut self, cut: bool, revision: u64, paths: &[PathBuf], failed: &[PathBuf]) {
-        self.pasting = false;
-        if cut && self.revision == revision {
-            // 只清理本次移动成功的源，保留其他窗口在执行期间更新过的路径。
-            self.paths = self
-                .paths
-                .iter()
-                .filter(|path| !paths.contains(path) || failed.contains(path))
-                .cloned()
-                .collect();
+            JobKind::Trash => {
+                let sources = sources.map(|(source, _)| source).collect::<Vec<_>>();
+                self.paths = self
+                    .paths
+                    .iter()
+                    .filter(|path| !sources.iter().any(|source| path.starts_with(source)))
+                    .cloned()
+                    .collect();
+            }
+            JobKind::Transfer { cut: true } => {
+                let sources = sources
+                    .map(|(source, _)| source)
+                    .collect::<std::collections::HashSet<_>>();
+                self.paths = self
+                    .paths
+                    .iter()
+                    .filter(|path| !sources.contains(path.as_path()))
+                    .cloned()
+                    .collect();
+            }
+            JobKind::Create | JobKind::Transfer { cut: false } => {}
         }
     }
+}
 
+#[derive(Default)]
+pub struct FileJobs {
+    running: usize,
+}
+
+impl Global for FileJobs {}
+
+impl FileJobs {
     pub fn quit_if_idle(cx: &mut gpui_kit::App) {
         if cx.windows().is_empty() && cx.global::<Self>().running == 0 {
             cx.quit();
@@ -116,113 +172,28 @@ pub(super) struct DirectoryProperties {
     focus: FocusHandle,
 }
 
-enum FileJob {
-    Create {
-        path: PathBuf,
-        folder: bool,
-    },
-    Rename(PathBuf, PathBuf),
-    Paste {
-        paths: Arc<[PathBuf]>,
-        directory: PathBuf,
-        cut: bool,
-        revision: u64,
-    },
-    Trash(Vec<PathBuf>),
-}
-
-#[derive(Default)]
-struct Outcome {
-    reveal: Option<PathBuf>,
-    failed: Vec<PathBuf>,
-    first_error: Option<String>,
-    renamed: Option<(PathBuf, PathBuf)>,
-    trashed: Vec<PathBuf>,
-}
-
-impl Outcome {
-    fn record(&mut self, path: &Path, result: io::Result<()>) -> bool {
-        if let Err(error) = result {
-            self.first_error.get_or_insert_with(|| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    format!("已存在同名项目：{}", path.display())
-                } else {
-                    format!("{}：{error}", path.display())
-                }
-            });
-            self.failed.push(path.to_owned());
-            return false;
-        }
-        true
-    }
-}
-
-impl FileJob {
-    fn run(&self) -> Outcome {
-        let mut result = Outcome::default();
-        match self {
-            Self::Create { path, folder } => {
-                result.record(path, files::create(path, *folder));
-                result.reveal = Some(path.clone());
-            }
-            Self::Rename(source, target) => {
-                if result.record(target, files::rename(source, target)) {
-                    result.reveal = Some(target.clone());
-                    if source != target {
-                        result.renamed = Some((source.clone(), target.clone()));
-                    }
-                }
-            }
-            Self::Paste {
-                paths,
-                directory,
-                cut,
-                ..
-            } => {
-                for path in paths.iter() {
-                    result.record(path, files::transfer(path, directory, *cut));
-                }
-            }
-            Self::Trash(paths) => {
-                for path in paths {
-                    if result.record(path, sys::trash::put(path)) {
-                        result.trashed.push(path.clone());
-                    }
-                }
-            }
-        }
-        result
-    }
+#[derive(Clone)]
+pub(super) struct FileMenuTarget {
+    pub(super) navigation_revision: u64,
+    pub(super) path: Option<PathBuf>,
 }
 
 impl App {
-    pub(super) fn handle_file_key(
+    /// 键盘快捷键的分发入口（由 `keymap::SHORTCUTS` 的键绑定触发）。
+    ///
+    /// 焦点在输入框（重命名、搜索等）时不拦截也不执行，让按键继续
+    /// 传给输入框做文本复制等操作。
+    pub(super) fn file_shortcut(
         &mut self,
-        event: &KeyDownEvent,
+        action: FileAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.focus.is_focused(window) || self.file_name_editor.is_some() {
             return;
         }
-        let key = &event.keystroke;
-        let modifiers = key.modifiers;
-        if modifiers.alt || modifiers.platform || modifiers.shift {
-            return;
-        }
-        let action = match (modifiers.control, key.key.as_str()) {
-            (true, "c") => FileAction::Copy,
-            (true, "x") => FileAction::Cut,
-            (true, "v") => FileAction::Paste,
-            (false, "f2") => FileAction::Rename,
-            (false, "delete") => FileAction::Trash,
-            (true, "a") => FileAction::SelectAll,
-            _ => return,
-        };
         cx.stop_propagation();
-        if !event.is_held {
-            self.file_action(action, None, window, cx);
-        }
+        self.file_action(action, None, window, cx);
     }
 
     pub(super) fn can_paste(&self, cx: &gpui_kit::App) -> bool {
@@ -234,10 +205,10 @@ impl App {
     }
 
     fn paste_available(&self, cx: &gpui_kit::App) -> bool {
-        let clipboard = cx.global::<FileOperations>();
+        let clipboard = cx.global::<FileClipboard>();
         !clipboard.paths.is_empty()
             && !clipboard.pasting
-            && !self.file_job_running
+            && !self.file_job.is_some()
             && matches!(self.browser.state, DirectoryState::Ready(_))
     }
 
@@ -256,31 +227,36 @@ impl App {
     pub(super) fn file_action(
         &mut self,
         action: FileAction,
-        menu_entry: Option<(u64, usize)>,
+        menu_target: Option<&FileMenuTarget>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.file_name_editor.is_some()
             || self.directory_properties.is_some()
-            || (self.file_job_running
+            || (self.file_job.is_some()
                 && !matches!(action, FileAction::SelectAll | FileAction::Properties))
         {
             return;
         }
-        if let Some((revision, index)) = menu_entry {
-            if revision != self.browser.snapshot_revision {
+        let mut menu_entry = None;
+        if let Some(target) = menu_target {
+            if target.navigation_revision != self.navigation_revision {
                 return;
             }
-            if self.browser.select_for_context_menu(index) {
-                cx.notify();
+            if let Some(path) = &target.path {
+                let Some(index) = self.browser.visible_entry_index(path) else {
+                    return;
+                };
+                menu_entry = Some(index);
+                if self.browser.select_for_context_menu(index) {
+                    cx.notify();
+                }
             }
         }
         window.focus(&self.focus, cx);
         match action {
             FileAction::SelectAll => {
-                self.browser.selection = self.browser.visible.iter().copied().collect();
-                self.browser.anchor = self.browser.visible.first().copied();
-                self.browser.reveal_path = None;
+                self.browser.select_all();
                 cx.notify();
             }
             FileAction::Properties => self.open_directory_properties(window, cx),
@@ -305,16 +281,12 @@ impl App {
                 }
             }
             FileAction::Rename => {
-                if self.browser.selection.len() != 1 {
+                if self.browser.selection_len() != 1 {
                     return;
                 }
-                if let Some((path, kind)) = self
-                    .browser
-                    .selection
-                    .first()
-                    .and_then(|&i| self.entry_target(i))
-                    && kind != EntryKind::Missing
-                {
+                let entry = self.browser.selected_entries().next();
+                if let Some(entry) = entry.filter(|entry| entry.kind != EntryKind::Missing) {
+                    let path = entry.path.clone();
                     let name = path
                         .file_name()
                         .unwrap_or_default()
@@ -326,10 +298,9 @@ impl App {
             FileAction::Cut | FileAction::Copy | FileAction::Trash => {
                 let paths: Vec<_> = self
                     .browser
-                    .selection
-                    .iter()
-                    .filter_map(|&index| self.entry_target(index))
-                    .filter_map(|(path, kind)| (kind != EntryKind::Missing).then_some(path))
+                    .selected_entries()
+                    .filter(|entry| entry.kind != EntryKind::Missing)
+                    .map(|entry| entry.path.clone())
                     .collect();
                 if paths.is_empty() {
                     return;
@@ -337,7 +308,7 @@ impl App {
                 if matches!(action, FileAction::Trash) {
                     self.run_file_job(FileJob::Trash(paths), window, cx);
                 } else {
-                    let clipboard = cx.global_mut::<FileOperations>();
+                    let clipboard = cx.global_mut::<FileClipboard>();
                     clipboard.revision += 1;
                     clipboard.paths = paths.into();
                     clipboard.cut = matches!(action, FileAction::Cut);
@@ -346,17 +317,19 @@ impl App {
                 }
             }
             FileAction::Paste => {
-                let entry = menu_entry.map(|(_, index)| index);
+                let entry = menu_entry.filter(|&index| {
+                    self.entry_target(index)
+                        .is_some_and(|(_, kind)| kind == EntryKind::Directory)
+                });
                 if self.paste_available(cx)
                     && let Some(directory) = self.paste_directory(entry)
                 {
-                    let clipboard = cx.global_mut::<FileOperations>();
+                    let clipboard = cx.global_mut::<FileClipboard>();
                     clipboard.pasting = true;
-                    let job = FileJob::Paste {
-                        paths: clipboard.paths.clone(),
+                    let job = FileJob::Transfer {
+                        sources: clipboard.paths.clone(),
                         directory,
                         cut: clipboard.cut,
-                        revision: clipboard.revision,
                     };
                     self.run_file_job(job, window, cx);
                 }
@@ -403,7 +376,7 @@ impl App {
     }
 
     fn submit_file_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_job_running {
+        if self.file_job.is_some() {
             return;
         }
         let Some(editor) = &mut self.file_name_editor else {
@@ -428,7 +401,10 @@ impl App {
                         files::named_path(parent, &value)
                     }
                 })
-                .map(|target| FileJob::Rename(source.clone(), target)),
+                .map(|target| FileJob::Rename {
+                    source: source.clone(),
+                    target,
+                }),
         };
         match target {
             Ok(job) => self.run_file_job(job, window, cx),
@@ -440,47 +416,44 @@ impl App {
     }
 
     fn run_file_job(&mut self, job: FileJob, window: &mut Window, cx: &mut Context<Self>) {
-        self.file_job_running = true;
-        let clipboard = cx.global_mut::<FileOperations>();
-        clipboard.running += 1;
-        let clipboard_revision = clipboard.revision;
+        let kind = job.kind();
+        self.file_job = Some(kind);
+        cx.global_mut::<FileJobs>().running += 1;
+        let clipboard_revision = cx.global::<FileClipboard>().revision;
         self.browser.action_error = None;
         if let Some(editor) = &mut self.file_name_editor {
             editor.error = None;
         }
         let navigation_revision = self.navigation_revision;
-        let named_job = matches!(job, FileJob::Create { .. } | FileJob::Rename(..));
-        let clipboard_job = match &job {
-            FileJob::Paste {
-                cut,
-                revision,
-                paths,
-                ..
-            } => Some((*cut, *revision, paths.clone())),
-            _ => None,
-        };
+        let named_job = matches!(kind, JobKind::Create | JobKind::Rename);
         let work = cx.background_spawn(async move { job.run() });
         let app_context = cx.to_async();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = work.await;
-            let failure_count = outcome.failed.len();
             // 窗口关闭后仍需结算任务并释放应用内剪贴板。
             app_context.update(|cx| {
-                let state = cx.global_mut::<FileOperations>();
-                state.running -= 1;
-                if let Some((cut, revision, paths)) = clipboard_job {
-                    state.finish_paste(cut, revision, &paths, &outcome.failed);
-                } else if state.revision == clipboard_revision
-                    && (outcome.renamed.is_some() || !outcome.trashed.is_empty())
-                {
-                    state.reconcile_cut(&outcome);
-                }
-                FileOperations::quit_if_idle(cx);
+                cx.global_mut::<FileJobs>().running -= 1;
+                cx.global_mut::<FileClipboard>()
+                    .finish_job(&outcome, clipboard_revision);
+                FileJobs::quit_if_idle(cx);
             });
             let _ = this.update_in(cx, |this, window, cx| {
-                this.file_job_running = false;
+                this.file_job = None;
                 let still_here = this.navigation_revision == navigation_revision;
-                if let Some(error) = outcome.first_error {
+                let mut failures = outcome.items.iter().filter_map(|item| {
+                    let error = item.result.as_ref().err()?;
+                    Some((item, error))
+                });
+                if let Some((item, error)) = failures.next() {
+                    let failure_count = 1 + failures.count();
+                    let path = item.target.as_ref().or(item.source.as_ref());
+                    let error = match path {
+                        Some(path) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            format!("已存在同名项目：{}", path.display())
+                        }
+                        Some(path) => format!("{}：{error}", path.display()),
+                        None => error.to_string(),
+                    };
                     if named_job && let Some(editor) = &mut this.file_name_editor {
                         editor.error = Some(error);
                         editor.input.update(cx, |input, cx| input.focus(window, cx));
@@ -493,7 +466,16 @@ impl App {
                     if named_job && this.file_name_editor.is_some() {
                         this.close_file_name(window, cx);
                     }
-                    this.refresh_after_file_operation(outcome.reveal.filter(|_| still_here), cx);
+                    let reveal = if named_job && still_here {
+                        outcome
+                            .items
+                            .into_iter()
+                            .next()
+                            .and_then(|item| item.target)
+                    } else {
+                        None
+                    };
+                    this.refresh_after_file_operation(reveal, cx);
                 }
                 cx.notify();
             });
@@ -590,7 +572,7 @@ impl App {
             NameTarget::Create { folder: false, .. } => "新建文档",
             NameTarget::Rename(_) => "重命名",
         };
-        let running = self.file_job_running;
+        let running = self.file_job.is_some();
         let danger = cx.theme().danger;
         Some(
             div()
@@ -606,7 +588,7 @@ impl App {
                         .w(px(360.))
                         .p_5()
                         .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.key == "escape" && !this.file_job_running {
+                            if event.keystroke.key == "escape" && !this.file_job.is_some() {
                                 cx.stop_propagation();
                                 this.close_file_name(window, cx);
                             }
@@ -649,49 +631,77 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileOperations, Outcome, Path, PathBuf};
+    use super::{FileClipboard, JobKind, JobResult, PathBuf};
+    use daemon::job::ItemResult;
 
     #[test]
     fn pending_cut_follows_successful_renames_and_removes_trashed_paths() {
-        let mut state = FileOperations {
+        let mut state = FileClipboard {
             paths: ["/source", "/source/file", "/source-other"]
                 .map(PathBuf::from)
                 .into(),
             cut: true,
             ..Default::default()
         };
-        state.reconcile_cut(&Outcome {
-            renamed: Some(("/source".into(), "/renamed".into())),
-            ..Default::default()
-        });
-        let paths = state.pending_cut_paths();
+        state.finish_job(
+            &JobResult {
+                kind: JobKind::Rename,
+                items: vec![ItemResult {
+                    source: Some("/source".into()),
+                    target: Some("/renamed".into()),
+                    result: Ok(()),
+                }],
+            },
+            0,
+        );
         assert_eq!(
-            paths,
+            state.pending_cut_paths(),
             ["/renamed", "/renamed/file", "/source-other"].map(PathBuf::from)
         );
-        assert_eq!(paths[0].as_os_str(), Path::new("/renamed").as_os_str());
-
-        state.reconcile_cut(&Outcome {
-            trashed: vec!["/renamed".into()],
-            ..Default::default()
-        });
+        state.finish_job(
+            &JobResult {
+                kind: JobKind::Trash,
+                items: vec![ItemResult {
+                    source: Some("/renamed".into()),
+                    target: None,
+                    result: Ok(()),
+                }],
+            },
+            0,
+        );
         assert_eq!(state.pending_cut_paths(), [PathBuf::from("/source-other")]);
     }
 
     #[test]
     fn cut_paste_removes_only_successful_sources_from_the_same_clipboard() {
-        let original = ["/moved", "/failed"].map(PathBuf::from);
-        let mut state = FileOperations {
-            paths: ["/moved", "/renamed"].map(PathBuf::from).into(),
+        let mut state = FileClipboard {
+            paths: ["/moved", "/failed", "/other"].map(PathBuf::from).into(),
             cut: true,
             revision: 2,
             pasting: true,
-            ..Default::default()
         };
-        state.finish_paste(true, 1, &original, &original[1..]);
-        assert_eq!(state.paths.len(), 2);
-        state.finish_paste(true, 2, &original, &original[1..]);
-        assert_eq!(state.pending_cut_paths(), [PathBuf::from("/renamed")]);
+        let result = JobResult {
+            kind: JobKind::Transfer { cut: true },
+            items: vec![
+                ItemResult {
+                    source: Some("/moved".into()),
+                    target: Some("/target/moved".into()),
+                    result: Ok(()),
+                },
+                ItemResult {
+                    source: Some("/failed".into()),
+                    target: Some("/target/failed".into()),
+                    result: Err(std::io::ErrorKind::AlreadyExists.into()),
+                },
+            ],
+        };
+        state.finish_job(&result, 1);
+        assert_eq!(state.paths.len(), 3);
+        state.finish_job(&result, 2);
+        assert_eq!(
+            state.pending_cut_paths(),
+            ["/failed", "/other"].map(PathBuf::from)
+        );
         assert!(!state.pasting);
     }
 }

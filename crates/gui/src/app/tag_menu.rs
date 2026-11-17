@@ -11,7 +11,7 @@ use gpui_kit::*;
 use uuid::Uuid;
 
 use super::App as FileManager;
-use super::file_item_actions::MENU_ICON_EXTRA_GAP;
+use super::menu::MENU_ICON_EXTRA_GAP;
 
 #[derive(Clone, Copy)]
 enum TagAction {

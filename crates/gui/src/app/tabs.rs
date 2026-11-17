@@ -12,6 +12,7 @@ use settings::tag::Tag;
 use uuid::Uuid;
 
 use super::App;
+use super::browser::TabBrowseState;
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, truncated_text, with_tooltip};
@@ -20,11 +21,10 @@ use crate::style::SIDEBAR_WIDTH;
 const TAB_BAR_PADDING: Pixels = px(8.);
 const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
 
-actions!(browser, [NewTab, CloseTab]);
-
 pub(super) struct BrowserTab {
     pub(super) id: Uuid,
     pub(super) terminal: super::embed_terminal::TabTerminal,
+    browse_state: Option<TabBrowseState>,
     history: Vec<Location>,
     index: usize,
 }
@@ -34,6 +34,7 @@ impl BrowserTab {
         Self {
             id,
             terminal: Default::default(),
+            browse_state: None,
             history: location.into_iter().collect(),
             index: 0,
         }
@@ -153,17 +154,19 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_active_tab(cx);
         self.tabs.push(BrowserTab::new(Uuid::new_v4(), location));
         self.active_tab = self.tabs.len() - 1;
         window.focus(&self.focus, cx);
-        self.location_changed(window, cx);
+        self.activate_tab(window, cx);
     }
 
     fn switch_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index < self.tabs.len() && index != self.active_tab {
+            self.remember_active_tab(cx);
             self.active_tab = index;
             window.focus(&self.focus, cx);
-            self.location_changed(window, cx);
+            self.activate_tab(window, cx);
         }
     }
 
@@ -176,7 +179,7 @@ impl App {
             std::cmp::Ordering::Equal => {
                 self.active_tab = index.min(self.tabs.len() - 1);
                 window.focus(&self.focus, cx);
-                self.location_changed(window, cx);
+                self.activate_tab(window, cx);
                 return;
             }
             std::cmp::Ordering::Less => self.active_tab -= 1,
@@ -221,6 +224,9 @@ impl App {
         let was_active = self.current_location().is_some_and(&removed);
         let home = self.home().map(|path| Location::directory(path.to_owned()));
         for tab in &mut self.tabs {
+            if tab.location().is_some_and(&removed) {
+                tab.browse_state = None;
+            }
             let before = tab.history[..tab.index]
                 .iter()
                 .filter(|item| !removed(item))
@@ -238,12 +244,43 @@ impl App {
         }
     }
 
+    fn remember_active_tab(&mut self, cx: &Context<Self>) {
+        if cx.global::<ActivePreferences>().0.view.remember_tab_state {
+            let search = self.search.read(cx).value().to_string();
+            self.tabs[self.active_tab].browse_state = Some(self.take_tab_browse_state(search));
+        }
+    }
+
+    pub(super) fn clear_saved_tab_states(&mut self) {
+        for tab in &mut self.tabs {
+            tab.browse_state = None;
+        }
+        self.browser.tab_restore = None;
+        self.browser.restore_row = None;
+    }
+
+    fn activate_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let saved = self.tabs[self.active_tab].browse_state.take();
+        self.change_browser_location(saved, window, cx);
+    }
+
     fn location_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.change_browser_location(None, window, cx);
+    }
+
+    fn change_browser_location(
+        &mut self,
+        saved: Option<TabBrowseState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.navigation_revision += 1;
-        self.browser.query.clear();
-        self.search.update(cx, |search, cx| {
-            search.set_value("", window, cx);
+        let search = saved.as_ref().map_or("", |state| state.search.as_str());
+        self.browser.query = search.trim().to_lowercase();
+        self.search.update(cx, |input, cx| {
+            input.set_value(search, window, cx);
         });
+        self.browser.tab_restore = saved;
         self.load_directory(cx);
         self.save_workspace(cx);
     }

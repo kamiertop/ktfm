@@ -1,13 +1,10 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{
-    Icon,
-    menu::{PopupMenu, PopupMenuItem},
-};
+use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{Context, Pixels, WeakEntity, Window, px};
 use settings::config::{bookmark::BookmarkKind, tab::Location};
 use uuid::Uuid;
 
-use super::App;
+use super::{App, menu::app_menu_item};
 
 // 保持书签菜单紧凑，较长的菜单项可以撑宽。
 const BOOKMARK_MENU_MIN_WIDTH: Pixels = px(140.);
@@ -68,20 +65,12 @@ impl App {
             let (label, icon) = command.appearance(bookmark.kind);
             let disabled =
                 !has_directory && matches!(command, Command::NewTab | Command::NewWindow);
-            let mut item = PopupMenuItem::new(label).disabled(disabled);
-            if let Some(icon) = icon {
-                item = item.icon(Icon::new(icon));
-            }
-            let owner = owner.clone();
-            menu = menu.item(item.on_click(move |_, window, cx| {
-                let owner = owner.clone();
-                // 先让菜单退出并还原焦点，再打开需要接管焦点的编辑框。
-                window.defer(cx, move |window, cx| {
-                    let _ = owner.update(cx, |this, cx| {
-                        this.apply_bookmark_command(id, command, anchor_y, window, cx);
-                    });
-                });
-            }));
+            menu = menu.item(
+                app_menu_item(owner, label, icon, move |app, window, cx| {
+                    app.apply_bookmark_command(id, command, anchor_y, window, cx);
+                })
+                .disabled(disabled),
+            );
         }
         menu
     }

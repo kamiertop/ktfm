@@ -15,6 +15,7 @@ pub enum EntryKind {
 #[derive(Debug)]
 pub struct Entry {
     pub name: OsString,
+    pub path: PathBuf,
     pub kind: EntryKind,
 }
 
@@ -61,6 +62,7 @@ pub fn read_directory(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<D
         };
         directory.entries.push(Entry {
             name: item.file_name(),
+            path: item.path(),
             kind,
         });
     }
@@ -75,10 +77,7 @@ pub fn read_directory(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<D
 }
 
 /// 读取标签引用，并保留暂时不可访问的路径供用户管理。
-pub fn read_references(
-    paths: Vec<PathBuf>,
-    cancelled: impl Fn() -> bool,
-) -> io::Result<(Directory, Vec<PathBuf>)> {
+pub fn read_references(paths: Vec<PathBuf>, cancelled: impl Fn() -> bool) -> io::Result<Directory> {
     let mut entries = Vec::with_capacity(paths.len());
     let mut read_errors = 0;
     for path in paths {
@@ -93,23 +92,19 @@ pub fn read_references(
             }
         };
         let name = path.file_name().unwrap_or(path.as_os_str()).to_os_string();
-        entries.push((Entry { name, kind }, path));
+        entries.push(Entry { name, path, kind });
     }
-    entries.sort_unstable_by(|(a, a_path), (b, b_path)| {
-        (a.kind != EntryKind::Directory, &a.name, a_path).cmp(&(
+    entries.sort_unstable_by(|a, b| {
+        (a.kind != EntryKind::Directory, &a.name, &a.path).cmp(&(
             b.kind != EntryKind::Directory,
             &b.name,
-            b_path,
+            &b.path,
         ))
     });
-    let (entries, paths) = entries.into_iter().unzip();
-    Ok((
-        Directory {
-            entries,
-            read_errors,
-        },
-        paths,
-    ))
+    Ok(Directory {
+        entries,
+        read_errors,
+    })
 }
 
 fn entry_kind(kind: fs::FileType) -> EntryKind {
@@ -141,12 +136,19 @@ mod tests {
             fs::write(&first, "")?;
             fs::write(&second, "")?;
             let missing = root.join("z-missing");
-            let (directory, paths) =
+            let directory =
                 read_references(vec![missing.clone(), second.clone(), first.clone()], || {
                     false
                 })?;
             assert_eq!(directory.read_errors, 1);
-            assert_eq!(paths, [first, second, missing]);
+            assert_eq!(
+                directory
+                    .entries
+                    .iter()
+                    .map(|entry| &entry.path)
+                    .collect::<Vec<_>>(),
+                [&first, &second, &missing]
+            );
             assert_eq!(directory.entries[0].name, directory.entries[1].name);
             assert_eq!(directory.entries[2].kind, EntryKind::Missing);
             Ok(())

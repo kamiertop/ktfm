@@ -1,6 +1,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
+use daemon::job::JobKind;
 use gpui_kit::assets::IconName;
 
 use gpui_kit::base::{Disableable as _, Selectable as _};
@@ -16,7 +17,7 @@ use vfs::EntryKind;
 use super::App;
 use super::bookmarks::BookmarkDrag;
 use super::browser::DirectoryState;
-use super::file_operations::FileOperations;
+use super::file_operations::FileClipboard;
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
@@ -30,6 +31,14 @@ const CONTENT_PADDING: Pixels = px(16.);
 const FILE_AREA_BOTTOM_PADDING: Pixels = px(56.);
 const GRID_GAP: Pixels = px(8.);
 const PENDING_CUT_OPACITY: f32 = 0.5;
+
+fn file_row_height(grid: bool) -> Pixels {
+    if grid {
+        GRID_TILE_HEIGHT + GRID_GAP
+    } else {
+        px(44.)
+    }
+}
 
 impl App {
     pub(super) fn file_area(
@@ -69,11 +78,17 @@ impl App {
                     None
                 };
                 let mut status = format!("{count} 个项目");
-                if !self.browser.selection.is_empty() {
-                    status.push_str(&format!(" · 已选中 {} 项", self.browser.selection.len()));
+                if self.browser.selection_len() != 0 {
+                    status.push_str(&format!(" · 已选中 {} 项", self.browser.selection_len()));
                 }
-                if self.file_job_running {
-                    status.push_str(" · 正在执行文件操作…");
+                if let Some(job) = self.file_job {
+                    status.push_str(match job {
+                        JobKind::Create => " · 正在新建…",
+                        JobKind::Rename => " · 正在重命名…",
+                        JobKind::Transfer { cut: false } => " · 正在复制…",
+                        JobKind::Transfer { cut: true } => " · 正在移动…",
+                        JobKind::Trash => " · 正在移到回收站…",
+                    });
                 }
                 if self.browser.filtering {
                     status.push_str(" · 正在筛选…");
@@ -85,6 +100,12 @@ impl App {
             }
         };
 
+        self.browser.scroll_layout = Some((columns, file_row_height(grid)));
+        if let Some(row) = self.browser.restore_row.take() {
+            self.browser
+                .scroll
+                .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
+        }
         if let Some(row) = self.browser.reveal_row.take() {
             self.browser
                 .scroll
@@ -179,41 +200,41 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let command = cx
+            .global::<ActivePreferences>()
+            .0
+            .actions
+            .blank_double_click
+            .to_command();
         self.browser.clear_selection();
         cx.notify();
         if click_count != 2 {
             return;
         }
-        let action = cx
-            .global::<ActivePreferences>()
-            .0
-            .actions
-            .blank_double_click;
-        match action.to_command() {
+        match command {
+            Some(AppCommand::RefreshCurrentDir) => self.refresh_directory(cx),
             Some(AppCommand::NavigateUp) => {
                 if let Some(parent) = self.location().and_then(std::path::Path::parent) {
                     self.navigate(parent.to_owned(), window, cx);
                 }
             }
-            Some(AppCommand::RefreshCurrentDir) => self.load_directory(cx),
             _ => {}
         }
     }
 
     fn path_to_copy(&self) -> Option<PathBuf> {
-        if self.browser.selection.len() == 1 {
+        if self.browser.selection_len() == 1 {
             self.browser
-                .selection
-                .first()
-                .and_then(|&index| self.entry_target(index))
-                .map(|(path, _)| path)
+                .selected_entries()
+                .next()
+                .map(|entry| entry.path.clone())
         } else {
             self.location().map(ToOwned::to_owned)
         }
     }
 
     pub(super) fn copy_path_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let label = if self.browser.selection.len() == 1 {
+        let label = if self.browser.selection_len() == 1 {
             "复制选中文件路径"
         } else {
             "复制当前目录路径"
@@ -222,7 +243,7 @@ impl App {
             "copy-path",
             icon_button("copy-full-path", IconName::Copy, label)
                 .small()
-                .disabled(self.browser.selection.len() != 1 && self.location().is_none())
+                .disabled(self.browser.selection_len() != 1 && self.location().is_none())
                 .on_click(cx.listener(|this, _, _, cx| {
                     let Some(path) = this.path_to_copy() else {
                         return;
@@ -296,11 +317,7 @@ impl App {
             .id(("file-row", row))
             .w_full()
             .gap(GRID_GAP)
-            .h(if grid {
-                GRID_TILE_HEIGHT + GRID_GAP
-            } else {
-                px(44.)
-            })
+            .h(file_row_height(grid))
             .children(
                 self.browser
                     .visible
@@ -321,31 +338,23 @@ impl App {
             return None;
         };
         let file = directory.directory.entries.get(index)?;
-        let source = directory
-            .paths
-            .as_ref()
-            .and_then(|paths| paths.get(index))
-            .and_then(|path| path.parent())
-            .map(|parent| parent.to_string_lossy().into_owned());
+        let source = matches!(
+            self.current_location(),
+            Some(settings::config::tab::Location::Tag { .. })
+        )
+        .then(|| file.path.parent())
+        .flatten()
+        .map(|parent| parent.to_string_lossy().into_owned());
         let snapshot_revision = self.browser.snapshot_revision;
         let name = file.name.to_string_lossy().into_owned();
         let (icon, kind) = entry_appearance(file.kind);
-        let cut_paths = cx.global::<FileOperations>().pending_cut_paths();
-        let target = if file.kind == EntryKind::Directory || !cut_paths.is_empty() {
-            self.entry_target(index)
-        } else {
-            None
-        };
-        let pending_cut = target
-            .as_ref()
-            .is_some_and(|(path, _)| cut_paths.contains(path));
-        let folder_drag = match target {
-            Some((path, EntryKind::Directory)) => Some(BookmarkDrag::Folder(path)),
-            _ => None,
-        };
+        let cut_paths = cx.global::<FileClipboard>().pending_cut_paths();
+        let pending_cut = cut_paths.contains(&file.path);
+        let folder_drag =
+            (file.kind == EntryKind::Directory).then(|| BookmarkDrag::Folder(file.path.clone()));
         let content_opacity = if pending_cut { PENDING_CUT_OPACITY } else { 1. };
         let owner = cx.weak_entity();
-        let selected = self.browser.selection.contains(&index);
+        let selected = self.browser.is_selected(&file.path);
         let theme = cx.theme();
         let hover = theme.list_hover;
         let active = file_selection_color(theme.mode);

@@ -1,12 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::Duration;
 
 use gpui_kit::*;
 use settings::config::tab::Location;
-use vfs::{Directory, DirectoryWatch, EntryKind, read_directory, read_references};
+use vfs::{Directory, DirectoryWatch, Entry, EntryKind, read_directory, read_references};
 
 use super::App;
 
@@ -19,7 +19,19 @@ pub(super) enum DirectoryState {
 
 pub(super) struct DirectorySnapshot {
     pub(super) directory: Directory,
-    pub(super) paths: Option<Vec<PathBuf>>,
+    indices: HashMap<PathBuf, usize>,
+}
+
+impl DirectorySnapshot {
+    fn new(directory: Directory) -> Self {
+        let indices = directory
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.path.clone(), index))
+            .collect();
+        Self { directory, indices }
+    }
 }
 
 enum ReadSource {
@@ -39,16 +51,36 @@ impl Drop for ReadTask {
     }
 }
 
+#[derive(Default)]
+pub(super) struct TabBrowseState {
+    pub(super) search: String,
+    selection: Selection,
+    scroll: Option<ScrollAnchor>,
+}
+
+struct ScrollAnchor {
+    path: PathBuf,
+    position: usize,
+}
+
+#[derive(Default)]
+struct Selection {
+    paths: BTreeSet<PathBuf>,
+    anchor: Option<PathBuf>,
+}
+
 pub(super) struct Browser {
     pub(super) state: DirectoryState,
     pub(super) query: String,
     pub(super) show_hidden: bool,
     pub(super) visible: Vec<usize>,
-    pub(super) selection: BTreeSet<usize>,
-    pub(super) anchor: Option<usize>,
+    selection: Selection,
     pub(super) reveal_path: Option<PathBuf>,
     pub(super) reveal_row: Option<usize>,
     pub(super) scroll: UniformListScrollHandle,
+    pub(super) scroll_layout: Option<(usize, Pixels)>,
+    pub(super) restore_row: Option<usize>,
+    pub(super) tab_restore: Option<TabBrowseState>,
     pub(super) action_error: Option<String>,
     pub(super) filtering: bool,
     pub(super) snapshot_revision: u64,
@@ -59,47 +91,159 @@ pub(super) struct Browser {
 }
 
 impl Browser {
+    fn snapshot(&self) -> Option<&DirectorySnapshot> {
+        match &self.state {
+            DirectoryState::Ready(snapshot) => Some(snapshot),
+            _ => None,
+        }
+    }
+
+    fn entry(&self, index: usize) -> Option<&Entry> {
+        self.snapshot()?.directory.entries.get(index)
+    }
+
+    pub(super) fn selection_len(&self) -> usize {
+        self.selection.paths.len()
+    }
+
+    pub(super) fn is_selected(&self, path: &Path) -> bool {
+        self.selection.paths.contains(path)
+    }
+
+    pub(super) fn selected_entries(&self) -> impl Iterator<Item = &Entry> {
+        let snapshot = self.snapshot();
+        let mut indices = self
+            .selection
+            .paths
+            .iter()
+            .filter_map(|path| snapshot?.indices.get(path).copied())
+            .collect::<Vec<_>>();
+        // 批量操作继续按列表顺序执行。
+        indices.sort_unstable();
+        indices
+            .into_iter()
+            .filter_map(move |index| self.entry(index))
+    }
+
     pub(super) fn clear_selection(&mut self) {
-        self.selection.clear();
-        self.anchor = None;
+        self.selection = Selection::default();
         self.reveal_path = None;
         self.reveal_row = None;
+    }
+
+    pub(super) fn select_all(&mut self) {
+        self.clear_selection();
+        let paths: BTreeSet<_> = self
+            .visible
+            .iter()
+            .filter_map(|&index| self.entry(index).map(|entry| entry.path.clone()))
+            .collect();
+        self.selection.anchor = self
+            .visible
+            .first()
+            .and_then(|&index| self.entry(index))
+            .map(|entry| entry.path.clone());
+        self.selection.paths = paths;
     }
 
     fn select_entry(&mut self, index: usize, modifiers: gpui_kit::Modifiers) {
+        let Some(path) = self.entry(index).map(|entry| entry.path.clone()) else {
+            return;
+        };
         self.reveal_path = None;
         self.reveal_row = None;
         if modifiers.shift
-            && let (Some(start), Ok(end)) = (
-                self.anchor
-                    .and_then(|anchor| self.visible.binary_search(&anchor).ok()),
-                self.visible.binary_search(&index),
-            )
+            && let Some(start) = self
+                .selection
+                .anchor
+                .as_ref()
+                .and_then(|anchor| self.snapshot()?.indices.get(anchor))
+                .and_then(|anchor| self.visible.binary_search(anchor).ok())
+            && let Ok(end) = self.visible.binary_search(&index)
         {
+            let paths: Vec<_> = self.visible[start.min(end)..=start.max(end)]
+                .iter()
+                .filter_map(|&index| self.entry(index).map(|entry| entry.path.clone()))
+                .collect();
             if !modifiers.control {
-                self.selection.clear();
+                self.selection.paths.clear();
             }
-            self.selection
-                .extend(&self.visible[start.min(end)..=start.max(end)]);
+            self.selection.paths.extend(paths);
             return;
         }
         if modifiers.control {
-            if !self.selection.remove(&index) {
-                self.selection.insert(index);
+            if !self.selection.paths.remove(&path) {
+                self.selection.paths.insert(path.clone());
             }
         } else {
-            self.selection.clear();
-            self.selection.insert(index);
+            self.selection.paths.clear();
+            self.selection.paths.insert(path.clone());
         }
-        self.anchor = Some(index);
+        self.selection.anchor = Some(path);
     }
 
     pub(super) fn select_for_context_menu(&mut self, index: usize) -> bool {
-        if self.selection.contains(&index) {
+        if self
+            .entry(index)
+            .is_none_or(|entry| self.is_selected(&entry.path))
+        {
             return false;
         }
         self.select_entry(index, gpui_kit::Modifiers::default());
         true
+    }
+
+    fn prune_selection(&mut self, drop_missing: bool) {
+        let DirectoryState::Ready(snapshot) = &self.state else {
+            return;
+        };
+        let visible = |path: &Path| {
+            snapshot.indices.get(path).is_some_and(|index| {
+                self.visible.binary_search(index).is_ok()
+                    && (!drop_missing
+                        || snapshot.directory.entries[*index].kind != EntryKind::Missing)
+            })
+        };
+        self.selection.paths.retain(|path| visible(path));
+        if self
+            .selection
+            .anchor
+            .as_deref()
+            .is_some_and(|path| !visible(path))
+        {
+            self.selection.anchor = None;
+        }
+    }
+
+    pub(super) fn visible_entry_index(&self, path: &Path) -> Option<usize> {
+        Some(self.visible[self.visible_position(path)?])
+    }
+
+    fn visible_position(&self, path: &Path) -> Option<usize> {
+        self.visible
+            .binary_search(self.snapshot()?.indices.get(path)?)
+            .ok()
+    }
+
+    fn scroll_anchor(&self) -> Option<ScrollAnchor> {
+        let position = self.restore_row.unwrap_or_else(|| {
+            self.scroll_layout.map_or(0, |(columns, row_height)| {
+                let offset = self.scroll.0.borrow().base_handle.offset();
+                ((-offset.y / row_height).max(0.) as usize) * columns
+            })
+        });
+        let index = *self.visible.get(position)?;
+        Some(ScrollAnchor {
+            path: self.entry(index)?.path.clone(),
+            position,
+        })
+    }
+
+    fn restore_scroll(&mut self, anchor: &ScrollAnchor) {
+        self.restore_row = self.visible.len().checked_sub(1).map(|last| {
+            self.visible_position(&anchor.path)
+                .unwrap_or(anchor.position.min(last))
+        });
     }
 
     pub(super) fn new(show_hidden: bool) -> Self {
@@ -108,11 +252,13 @@ impl Browser {
             query: String::new(),
             show_hidden,
             visible: Vec::new(),
-            selection: BTreeSet::new(),
-            anchor: None,
+            selection: Selection::default(),
             reveal_path: None,
             reveal_row: None,
             scroll: UniformListScrollHandle::new(),
+            scroll_layout: None,
+            restore_row: None,
+            tab_restore: None,
             action_error: None,
             filtering: false,
             snapshot_revision: 0,
@@ -126,15 +272,7 @@ impl Browser {
 
 impl App {
     pub(super) fn load_directory(&mut self, cx: &mut Context<Self>) {
-        let source = self.current_location().map(|location| match location {
-            Location::Directory { path } => ReadSource::Directory(path.0.clone()),
-            Location::Tag { id } => self
-                .tags(cx)
-                .get(*id)
-                .map_or(ReadSource::MissingTag, |tag| {
-                    ReadSource::Tag(tag.paths.iter().map(|path| path.0.clone()).collect())
-                }),
-        });
+        let source = self.read_source(cx);
         let tag_pending = matches!(source, Some(ReadSource::MissingTag))
             .then(|| self.tag_state.read(cx))
             .filter(|state| state.loaded_tags().is_none())
@@ -153,6 +291,7 @@ impl App {
         browser.clear_selection();
         browser.action_error = None;
         browser.scroll = UniformListScrollHandle::new();
+        browser.restore_row = None;
         let Some(source) = source else {
             browser.state = DirectoryState::Unavailable;
             cx.notify();
@@ -168,10 +307,10 @@ impl App {
         if let ReadSource::Directory(path) = &source {
             self.watch_directory(path, cx);
         }
-        self.read_snapshot(source, false, cx);
+        self.read_snapshot(source, cx);
     }
 
-    fn watch_directory(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+    fn watch_directory(&mut self, path: &Path, cx: &mut Context<Self>) {
         let watch = match DirectoryWatch::new(path) {
             Ok(watch) => watch,
             Err(error) => {
@@ -206,25 +345,35 @@ impl App {
         self.refresh_directory(cx);
     }
 
-    fn refresh_directory(&mut self, cx: &mut Context<Self>) {
+    fn read_source(&self, cx: &Context<Self>) -> Option<ReadSource> {
+        self.current_location().map(|location| match location {
+            Location::Directory { path } => ReadSource::Directory(path.0.clone()),
+            Location::Tag { id } => self
+                .tags(cx)
+                .get(*id)
+                .map_or(ReadSource::MissingTag, |tag| {
+                    ReadSource::Tag(tag.paths.iter().map(|path| path.0.clone()).collect())
+                }),
+        })
+    }
+
+    pub(super) fn refresh_directory(&mut self, cx: &mut Context<Self>) {
         if self.browser.read_task.is_some() {
             self.browser.refresh_pending = true;
             return;
         }
-        let source = match self.current_location() {
-            Some(Location::Directory { path }) => ReadSource::Directory(path.0.clone()),
-            Some(Location::Tag { id }) => {
-                let Some(tag) = self.tags(cx).get(*id) else {
-                    return;
-                };
-                ReadSource::Tag(tag.paths.iter().map(|path| path.0.clone()).collect())
-            }
-            None => return,
+        let Some(source) = self.read_source(cx) else {
+            return;
         };
-        self.read_snapshot(source, true, cx);
+        if let ReadSource::Directory(path) = &source
+            && self.browser.directory_watch.is_none()
+        {
+            self.watch_directory(path, cx);
+        }
+        self.read_snapshot(source, cx);
     }
 
-    fn read_snapshot(&mut self, source: ReadSource, refresh: bool, cx: &mut Context<Self>) {
+    fn read_snapshot(&mut self, source: ReadSource, cx: &mut Context<Self>) {
         let browser = &mut self.browser;
         let snapshot_revision = browser.snapshot_revision;
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -233,16 +382,13 @@ impl App {
         let show_hidden = browser.show_hidden;
         let read = cx.background_spawn(async move {
             let is_cancelled = || read_cancelled.load(Relaxed);
-            let (directory, paths) = match source {
-                ReadSource::Directory(path) => (read_directory(&path, is_cancelled)?, None),
-                ReadSource::Tag(paths) => {
-                    let (directory, paths) = read_references(paths, is_cancelled)?;
-                    (directory, Some(paths))
-                }
+            let directory = match source {
+                ReadSource::Directory(path) => read_directory(&path, is_cancelled)?,
+                ReadSource::Tag(paths) => read_references(paths, is_cancelled)?,
                 ReadSource::MissingTag => return Err(std::io::Error::other("标签已删除")),
             };
             let visible = filtered_entries(&directory, &query, show_hidden, &read_cancelled);
-            Ok::<_, std::io::Error>((DirectorySnapshot { directory, paths }, visible, query))
+            Ok::<_, std::io::Error>((DirectorySnapshot::new(directory), visible, query))
         });
         let task = cx.spawn(async move |this, cx| {
             let result = read.await;
@@ -258,7 +404,7 @@ impl App {
                             query == this.browser.query && show_hidden == this.browser.show_hidden;
                         if filter_matches {
                             this.replace_snapshot(directory, visible);
-                        } else if refresh {
+                        } else if matches!(this.browser.state, DirectoryState::Ready(_)) {
                             // 旧索引仍对应当前快照，等后台按最新筛选条件读完再替换。
                             refresh_pending = true;
                         } else {
@@ -291,63 +437,54 @@ impl App {
 
     fn replace_snapshot(&mut self, snapshot: DirectorySnapshot, visible: Vec<usize>) {
         let browser = &mut self.browser;
-        // 按排序键恢复选区。标签页可引用多个同名文件，因此也比较完整路径。
-        if let DirectoryState::Ready(previous) = &browser.state
-            && (!browser.selection.is_empty() || browser.anchor.is_some())
-        {
-            let tag_indices = snapshot.paths.as_ref().map(|paths| {
-                paths
-                    .iter()
-                    .enumerate()
-                    .map(|(index, path)| (path, index))
-                    .collect::<HashMap<_, _>>()
-            });
-            let remap = |index: usize| {
-                let new_index =
-                    if let (Some(indices), Some(paths)) = (&tag_indices, &previous.paths) {
-                        *indices.get(paths.get(index)?)?
-                    } else {
-                        let selected = previous.directory.entries.get(index)?;
-                        let key = (selected.kind != EntryKind::Directory, &selected.name);
-                        snapshot
-                            .directory
-                            .entries
-                            .binary_search_by(|entry| {
-                                (entry.kind != EntryKind::Directory, &entry.name).cmp(&key)
-                            })
-                            .ok()?
-                    };
-                visible.binary_search(&new_index).ok().map(|_| new_index)
-            };
-            browser.selection = browser
-                .selection
-                .iter()
-                .filter_map(|&index| remap(index))
-                .collect();
-            browser.anchor = browser.anchor.and_then(remap);
-        }
-        if let Some(path) = browser.reveal_path.take()
-            && let Some(position) = visible.iter().position(|&index| {
-                if let Some(paths) = &snapshot.paths {
-                    paths.get(index) == Some(&path)
-                } else {
-                    snapshot.directory.entries[index].name.as_os_str()
-                        == path.file_name().unwrap_or_default()
-                }
-            })
-        {
-            let index = visible[position];
-            browser.selection.clear();
-            browser.selection.insert(index);
-            browser.anchor = Some(index);
-            browser.reveal_row = Some(position);
-        }
-        // 替换快照后，旧卡片和筛选任务不能继续使用原来的索引。
+        // 刷新时按路径保留滚动锚点，文件插入或移除后仍能回到附近。
+        let scroll = browser.scroll_anchor();
         browser.snapshot_revision += 1;
         browser.filter_task = None;
         browser.filtering = false;
         browser.state = DirectoryState::Ready(Arc::new(snapshot));
         browser.visible = visible;
+        browser.prune_selection(false);
+        if let Some(anchor) = scroll
+            && browser.visible_position(&anchor.path) != Some(anchor.position)
+        {
+            browser.restore_scroll(&anchor);
+        }
+        self.restore_snapshot_position();
+    }
+
+    pub(super) fn take_tab_browse_state(&mut self, search: String) -> TabBrowseState {
+        let browser = &mut self.browser;
+        // 快速切换时，新快照可能还没到，继续保留未恢复的状态。
+        if let Some(mut pending) = browser.tab_restore.take() {
+            pending.search = search;
+            return pending;
+        }
+        let scroll = browser.scroll_anchor();
+        TabBrowseState {
+            search,
+            selection: std::mem::take(&mut browser.selection),
+            scroll,
+        }
+    }
+
+    fn restore_snapshot_position(&mut self) {
+        let browser = &mut self.browser;
+        if let Some(saved) = browser.tab_restore.take() {
+            browser.selection = saved.selection;
+            browser.prune_selection(true);
+            if let Some(anchor) = saved.scroll {
+                browser.restore_scroll(&anchor);
+            }
+        }
+        if let Some(path) = browser.reveal_path.take()
+            && let Some(position) = browser.visible_position(&path)
+        {
+            browser.selection.paths = BTreeSet::from([path.clone()]);
+            browser.selection.anchor = Some(path);
+            browser.restore_row = None;
+            browser.reveal_row = Some(position);
+        }
     }
 
     pub(super) fn search_directory(&mut self, query: String, cx: &mut Context<Self>) {
@@ -390,16 +527,12 @@ impl App {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.browser.snapshot_revision == snapshot_revision {
-                    this.browser
-                        .selection
-                        .retain(|index| visible.binary_search(index).is_ok());
-                    this.browser.anchor = this
-                        .browser
-                        .anchor
-                        .filter(|index| visible.binary_search(index).is_ok());
                     this.browser.visible = visible;
+                    this.browser.prune_selection(false);
                     this.browser.filtering = false;
                     this.browser.scroll = UniformListScrollHandle::new();
+                    this.browser.restore_row = None;
+                    this.restore_snapshot_position();
                     cx.notify();
                 }
             });
@@ -412,15 +545,8 @@ impl App {
     }
 
     pub(super) fn entry_target(&self, index: usize) -> Option<(PathBuf, EntryKind)> {
-        let DirectoryState::Ready(snapshot) = &self.browser.state else {
-            return None;
-        };
-        let entry = snapshot.directory.entries.get(index)?;
-        let path = match &snapshot.paths {
-            Some(paths) => paths.get(index)?.clone(),
-            None => self.location()?.join(&entry.name),
-        };
-        Some((path, entry.kind))
+        let entry = self.browser.entry(index)?;
+        Some((entry.path.clone(), entry.kind))
     }
 
     pub(super) fn activate_entry(
@@ -530,10 +656,36 @@ mod tests {
     use super::{AtomicBool, Browser, Relaxed, filtered_entries};
     use vfs::{Directory, Entry, EntryKind};
 
+    fn browser_with_entries() -> Browser {
+        let mut browser = Browser::new(false);
+        let entries = (0..9)
+            .map(|index| Entry {
+                name: index.to_string().into(),
+                path: format!("/{index}").into(),
+                kind: EntryKind::File,
+            })
+            .collect();
+        browser.state = super::DirectoryState::Ready(
+            super::DirectorySnapshot::new(Directory {
+                entries,
+                read_errors: 0,
+            })
+            .into(),
+        );
+        browser.visible = vec![0, 2, 5, 8];
+        browser
+    }
+
+    fn selected_names(browser: &Browser) -> Vec<&str> {
+        browser
+            .selected_entries()
+            .map(|entry| entry.name.to_str().unwrap())
+            .collect()
+    }
+
     #[test]
     fn range_selection_respects_filter_and_control_click_toggles() {
-        let mut browser = Browser::new(false);
-        browser.visible = vec![0, 2, 5, 8];
+        let mut browser = browser_with_entries();
         browser.select_entry(2, Modifiers::default());
         browser.select_entry(
             8,
@@ -542,10 +694,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            browser.selection.iter().copied().collect::<Vec<_>>(),
-            [2, 5, 8]
-        );
+        assert_eq!(selected_names(&browser), ["2", "5", "8"]);
         browser.select_entry(
             5,
             Modifiers {
@@ -553,29 +702,75 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(
-            browser.selection.iter().copied().collect::<Vec<_>>(),
-            [2, 8]
-        );
+        assert_eq!(selected_names(&browser), ["2", "8"]);
         browser.clear_selection();
-        assert!(browser.selection.is_empty());
-        assert_eq!(browser.anchor, None);
+        assert_eq!(browser.selection_len(), 0);
+        assert_eq!(browser.selection.anchor, None);
     }
 
     #[test]
     fn context_menu_preserves_selected_group_and_replaces_it_for_other_entries() {
-        let mut browser = Browser::new(false);
-        browser.selection.extend([2, 5]);
-
-        assert!(!browser.select_for_context_menu(5));
-        assert_eq!(
-            browser.selection.iter().copied().collect::<Vec<_>>(),
-            [2, 5]
+        let mut browser = browser_with_entries();
+        browser.select_entry(2, Modifiers::default());
+        browser.select_entry(
+            5,
+            Modifiers {
+                control: true,
+                ..Default::default()
+            },
         );
 
+        assert!(!browser.select_for_context_menu(5));
+        assert_eq!(selected_names(&browser), ["2", "5"]);
+
         assert!(browser.select_for_context_menu(8));
-        assert_eq!(browser.selection.iter().copied().collect::<Vec<_>>(), [8]);
-        assert_eq!(browser.anchor, Some(8));
+        assert_eq!(selected_names(&browser), ["8"]);
+        assert_eq!(
+            browser.selection.anchor.as_deref(),
+            Some(std::path::Path::new("/8"))
+        );
+    }
+
+    #[test]
+    fn selection_follows_paths_after_reordering_and_drops_hidden_entries() {
+        let mut browser = browser_with_entries();
+        browser.select_all();
+        let entries = ["8", "2", "5", "0"]
+            .into_iter()
+            .map(|name| Entry {
+                name: name.into(),
+                path: format!("/{name}").into(),
+                kind: EntryKind::File,
+            })
+            .collect();
+        browser.state = super::DirectoryState::Ready(
+            super::DirectorySnapshot::new(Directory {
+                entries,
+                read_errors: 0,
+            })
+            .into(),
+        );
+        browser.visible = vec![0, 1, 3];
+        browser.prune_selection(false);
+
+        assert_eq!(selected_names(&browser), ["8", "2", "0"]);
+        assert_eq!(
+            browser.selection.anchor.as_deref(),
+            Some(std::path::Path::new("/0"))
+        );
+        assert_eq!(
+            browser.visible_entry_index(std::path::Path::new("/8")),
+            Some(0)
+        );
+        assert_eq!(
+            browser.visible_entry_index(std::path::Path::new("/5")),
+            None
+        );
+        browser.restore_scroll(&super::ScrollAnchor {
+            path: "/0".into(),
+            position: 0,
+        });
+        assert_eq!(browser.restore_row, Some(2));
     }
 
     #[test]
@@ -585,6 +780,7 @@ mod tests {
                 .into_iter()
                 .map(|name| Entry {
                     name: name.into(),
+                    path: name.into(),
                     kind: EntryKind::File,
                 })
                 .collect(),
