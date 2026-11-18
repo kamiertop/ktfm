@@ -12,6 +12,7 @@ use crate::style::{
 
 pub fn title_bar(
     navigation: impl IntoElement,
+    split_controls: impl IntoElement,
     radius: Pixels,
     toggle_settings: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     window: &Window,
@@ -67,6 +68,7 @@ pub fn title_bar(
                     window,
                     &toolbar_drag,
                 ))
+                .child(h_flex().flex_shrink_0().child(split_controls))
                 .child(with_tooltip(
                     icon_button("theme", theme_icon, theme_label).on_click(move |_, window, cx| {
                         Theme::change(next_mode, Some(window), cx);

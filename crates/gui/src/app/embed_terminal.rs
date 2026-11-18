@@ -73,7 +73,10 @@ impl Render for ResizePreview {
 
 impl App {
     pub(super) fn toggle_embedded_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs[self.active_tab].terminal.visible {
+        if self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab]
+            .terminal
+            .visible
+        {
             self.hide_embedded_terminal(window, cx);
         } else {
             self.show_embedded_terminal(window, cx);
@@ -86,7 +89,8 @@ impl App {
             .map(ToOwned::to_owned)
             .or_else(home_directory);
         let owner = cx.weak_entity();
-        let terminal = &mut self.tabs[self.active_tab].terminal;
+        let pane = &mut self.panes[self.pane_target];
+        let terminal = &mut pane.tabs[pane.active_tab].terminal;
         if terminal.view.as_ref().is_none_or(|view| {
             view.read(cx)
                 .session
@@ -103,7 +107,8 @@ impl App {
     }
 
     fn hide_embedded_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs[self.active_tab].terminal.visible = false;
+        let pane = &mut self.panes[self.pane_target];
+        pane.tabs[pane.active_tab].terminal.visible = false;
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -111,23 +116,25 @@ impl App {
     pub(super) fn resize_embedded_terminal(
         &mut self,
         event: &DragMoveEvent<TerminalResize>,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab = &mut self.tabs[self.active_tab];
+        let pane = &mut self.panes[self.pane_target];
+        let tab = &mut pane.tabs[pane.active_tab];
         let drag = event.drag(cx);
         if tab.id == drag.tab && tab.terminal.visible {
+            let maximum = max_height(event.bounds.size.height);
             tab.terminal.height = (event.bounds.bottom() - event.event.position.y
                 + drag.offset.get())
-            .clamp(MIN_HEIGHT, max_height(window));
+            .clamp(MIN_HEIGHT.min(maximum), maximum);
             cx.notify();
         }
     }
 
-    pub(super) fn embedded_terminal_panel(&self, window: &Window) -> Option<AnyElement> {
-        let tab = &self.tabs[self.active_tab];
+    pub(super) fn embedded_terminal_panel(&self, pane_height: Pixels) -> Option<AnyElement> {
+        let tab = &self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab];
         let view = tab.terminal.view.clone().filter(|_| tab.terminal.visible)?;
-        let height = tab.terminal.height.min(max_height(window));
+        let height = tab.terminal.height.min(max_height(pane_height));
         let drag = TerminalResize {
             tab: tab.id,
             offset: Cell::new(HANDLE_HEIGHT / 2.),
@@ -156,9 +163,8 @@ impl App {
     }
 }
 
-fn max_height(window: &Window) -> Pixels {
-    let height = window.viewport_size().height;
-    (height * 0.75).min(height - px(180.)).max(MIN_HEIGHT)
+fn max_height(height: Pixels) -> Pixels {
+    (height * 0.75).min((height - px(180.)).max(height * 0.4))
 }
 
 struct TerminalView {
@@ -261,7 +267,9 @@ impl TerminalView {
     /// 复制选区。选区为空时不拦截按键，让 ctrl-c 等继续传给终端
     /// 编码为中断信号。
     fn copy_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
         let text = session.grid.lock().selection_to_string();
         if let Some(text) = text.filter(|text| !text.is_empty()) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -271,7 +279,9 @@ impl TerminalView {
 
     /// 粘贴剪贴板；会话已退出时只拦截按键不发送。
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             let mode = *session.grid.lock().mode();
             let text = if mode.contains(TermMode::BRACKETED_PASTE) {
@@ -290,7 +300,9 @@ impl TerminalView {
     fn key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         let modifiers = key.modifiers;
-        let Some(session) = self.session.as_ref() else { return };
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
         if modifiers.platform || modifiers.function {
             return;
         }
@@ -347,9 +359,7 @@ impl Render for TerminalView {
             .cursor(CursorStyle::IBeam)
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &TerminalCopy, _, cx| this.copy_selection(cx)))
-            .on_action(cx.listener(|this, _: &TerminalPaste, _, cx| {
-                this.paste_clipboard(cx)
-            }))
+            .on_action(cx.listener(|this, _: &TerminalPaste, _, cx| this.paste_clipboard(cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

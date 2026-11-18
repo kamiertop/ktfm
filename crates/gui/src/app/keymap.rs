@@ -15,7 +15,24 @@ use settings::config::shortcuts::ShortcutConfig;
 use super::file_operations::FileAction;
 
 // 标签页、终端与偏好设置等应用级动作。
-actions!(browser, [NewTab, CloseTab, OpenTerminal, OpenPreferences]);
+actions!(
+    browser,
+    [
+        NewTab,
+        CloseTab,
+        OpenTerminal,
+        OpenPreferences,
+        SplitPane,
+        SplitDown,
+        SplitLeft,
+        SplitUp,
+        PaneLeft,
+        PaneRight,
+        PaneUp,
+        PaneDown,
+        ClosePane
+    ]
+);
 // 内嵌终端聚焦时由终端视图处理的剪贴板动作。
 actions!(browser, [TerminalCopy, TerminalPaste]);
 
@@ -82,6 +99,15 @@ macro_rules! shortcut_entries {
 shortcut_entries! {
     (NewTab, new_tab, "新建标签页", ShortcutScope::FileArea),
     (CloseTab, close_tab, "关闭标签页", ShortcutScope::FileArea),
+    (SplitPane, split_pane, "向右分栏", ShortcutScope::FileArea),
+    (SplitDown, split_down, "向下分栏", ShortcutScope::FileArea),
+    (SplitLeft, split_left, "向左分栏", ShortcutScope::FileArea),
+    (SplitUp, split_up, "向上分栏", ShortcutScope::FileArea),
+    (PaneLeft, pane_left, "向左切换活动栏", ShortcutScope::FileArea),
+    (PaneRight, pane_right, "向右切换活动栏", ShortcutScope::FileArea),
+    (PaneUp, pane_up, "向上切换活动栏", ShortcutScope::FileArea),
+    (PaneDown, pane_down, "向下切换活动栏", ShortcutScope::FileArea),
+    (ClosePane, close_pane, "关闭分栏", ShortcutScope::FileArea),
     (OpenTerminal, open_terminal, "打开终端", ShortcutScope::Everywhere),
     (OpenPreferences, open_preferences, "偏好设置", ShortcutScope::FileArea),
     (FileAction::SelectAll, select_all, "全选", ShortcutScope::FileArea),
@@ -110,10 +136,7 @@ pub(super) fn validate(shortcuts: &ShortcutConfig) -> Result<(), String> {
             .iter()
             .find(|(scope, other, _)| scope.overlaps(entry.scope) && other == &key)
         {
-            return Err(format!(
-                "“{label}”和“{}”不能使用相同的快捷键",
-                entry.label
-            ));
+            return Err(format!("“{label}”和“{}”不能使用相同的快捷键", entry.label));
         }
         parsed.push((entry.scope, key, entry.label));
     }
@@ -122,10 +145,7 @@ pub(super) fn validate(shortcuts: &ShortcutConfig) -> Result<(), String> {
 
 /// 把一份快捷键配置安装为全局键绑定。整体校验通过后才安装，
 /// 任一按键无效即报错且不改动现有绑定。
-pub(super) fn bind_all(
-    shortcuts: &ShortcutConfig,
-    cx: &mut gpui_kit::App,
-) -> Result<(), String> {
+pub(super) fn bind_all(shortcuts: &ShortcutConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
     validate(shortcuts)?;
     let bindings = SHORTCUTS
         .iter()

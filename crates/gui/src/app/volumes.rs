@@ -76,7 +76,8 @@ impl App {
             state.error = None;
             cx.notify();
         });
-        let revision = self.navigation_revision;
+        let pane_id = self.pane().id;
+        let revision = self.pane().navigation_revision;
         let handle = window.window_handle().downcast::<Self>();
         let mount_device = device.clone();
         let mount = cx.background_spawn(async move { mount::mount(&mount_device) });
@@ -102,9 +103,11 @@ impl App {
                 });
                 if let (Some(handle), Ok(path)) = (handle, result) {
                     let _ = handle.update(cx, |this, window, cx| {
-                        if this.navigation_revision == revision {
-                            this.navigate(path, window, cx);
-                        }
+                        this.with_pane(pane_id, |this| {
+                            if this.pane().navigation_revision == revision {
+                                this.navigate(path, window, cx);
+                            }
+                        });
                     });
                 }
             });

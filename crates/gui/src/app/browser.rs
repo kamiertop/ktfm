@@ -280,7 +280,7 @@ impl App {
                 Some(error) => DirectoryState::Failed(error.to_owned()),
                 None => DirectoryState::Loading,
             });
-        let browser = &mut self.browser;
+        let browser = &mut self.panes[self.pane_target].browser;
         browser.snapshot_revision += 1;
         browser.read_task = None;
         browser.directory_watch = None;
@@ -318,20 +318,26 @@ impl App {
                 return;
             }
         };
+        let pane_id = self.panes[self.pane_target].id;
         let executor = cx.background_executor().clone();
-        self.browser.directory_watch = Some(cx.spawn(async move |this, cx| {
-            while watch.changed().await {
-                // 合并复制、解压等短时间内连续产生的文件系统事件。
-                executor.timer(Duration::from_millis(120)).await;
-                watch.coalesce();
-                if this
-                    .update(cx, |this, cx| this.refresh_directory(cx))
-                    .is_err()
-                {
-                    break;
+        self.panes[self.pane_target].browser.directory_watch =
+            Some(cx.spawn(async move |this, cx| {
+                while watch.changed().await {
+                    // 合并复制、解压等短时间内连续产生的文件系统事件。
+                    executor.timer(Duration::from_millis(120)).await;
+                    watch.coalesce();
+                    if this
+                        .update(cx, |this, cx| {
+                            this.with_pane(pane_id, |this| this.refresh_directory(cx))
+                        })
+                        .ok()
+                        .flatten()
+                        .is_none()
+                    {
+                        break;
+                    }
                 }
-            }
-        }));
+            }));
     }
 
     pub(super) fn refresh_after_file_operation(
@@ -339,9 +345,9 @@ impl App {
         reveal: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.browser.read_task = None;
-        self.browser.refresh_pending = false;
-        self.browser.reveal_path = reveal;
+        self.panes[self.pane_target].browser.read_task = None;
+        self.panes[self.pane_target].browser.refresh_pending = false;
+        self.panes[self.pane_target].browser.reveal_path = reveal;
         self.refresh_directory(cx);
     }
 
@@ -358,15 +364,18 @@ impl App {
     }
 
     pub(super) fn refresh_directory(&mut self, cx: &mut Context<Self>) {
-        if self.browser.read_task.is_some() {
-            self.browser.refresh_pending = true;
+        if self.panes[self.pane_target].browser.read_task.is_some() {
+            self.panes[self.pane_target].browser.refresh_pending = true;
             return;
         }
         let Some(source) = self.read_source(cx) else {
             return;
         };
         if let ReadSource::Directory(path) = &source
-            && self.browser.directory_watch.is_none()
+            && self.panes[self.pane_target]
+                .browser
+                .directory_watch
+                .is_none()
         {
             self.watch_directory(path, cx);
         }
@@ -374,7 +383,8 @@ impl App {
     }
 
     fn read_snapshot(&mut self, source: ReadSource, cx: &mut Context<Self>) {
-        let browser = &mut self.browser;
+        let pane_id = self.panes[self.pane_target].id;
+        let browser = &mut self.panes[self.pane_target].browser;
         let snapshot_revision = browser.snapshot_revision;
         let cancelled = Arc::new(AtomicBool::new(false));
         let read_cancelled = cancelled.clone();
@@ -393,39 +403,47 @@ impl App {
         let task = cx.spawn(async move |this, cx| {
             let result = read.await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.snapshot_revision != snapshot_revision {
-                    return;
-                }
-                this.browser.read_task = None;
-                let mut refresh_pending = std::mem::take(&mut this.browser.refresh_pending);
-                match result {
-                    Ok((directory, visible, query)) => {
-                        let filter_matches =
-                            query == this.browser.query && show_hidden == this.browser.show_hidden;
-                        if filter_matches {
-                            this.replace_snapshot(directory, visible);
-                        } else if matches!(this.browser.state, DirectoryState::Ready(_)) {
-                            // 旧索引仍对应当前快照，等后台按最新筛选条件读完再替换。
-                            refresh_pending = true;
-                        } else {
-                            this.browser.state = DirectoryState::Ready(Arc::new(directory));
-                            this.filter_directory(false, cx);
+                this.with_pane(pane_id, |this| {
+                    if this.panes[this.pane_target].browser.snapshot_revision != snapshot_revision {
+                        return;
+                    }
+                    this.panes[this.pane_target].browser.read_task = None;
+                    let mut refresh_pending =
+                        std::mem::take(&mut this.panes[this.pane_target].browser.refresh_pending);
+                    match result {
+                        Ok((directory, visible, query)) => {
+                            let filter_matches = query
+                                == this.panes[this.pane_target].browser.query
+                                && show_hidden == this.panes[this.pane_target].browser.show_hidden;
+                            if filter_matches {
+                                this.replace_snapshot(directory, visible);
+                            } else if matches!(
+                                this.panes[this.pane_target].browser.state,
+                                DirectoryState::Ready(_)
+                            ) {
+                                // 旧索引仍对应当前快照，等后台按最新筛选条件读完再替换。
+                                refresh_pending = true;
+                            } else {
+                                this.panes[this.pane_target].browser.state =
+                                    DirectoryState::Ready(Arc::new(directory));
+                                this.filter_directory(false, cx);
+                            }
+                        }
+                        Err(error) => {
+                            let browser = &mut this.panes[this.pane_target].browser;
+                            browser.snapshot_revision += 1;
+                            browser.filter_task = None;
+                            browser.filtering = false;
+                            browser.visible.clear();
+                            browser.clear_selection();
+                            browser.state = DirectoryState::Failed(error.to_string());
                         }
                     }
-                    Err(error) => {
-                        let browser = &mut this.browser;
-                        browser.snapshot_revision += 1;
-                        browser.filter_task = None;
-                        browser.filtering = false;
-                        browser.visible.clear();
-                        browser.clear_selection();
-                        browser.state = DirectoryState::Failed(error.to_string());
+                    if refresh_pending {
+                        this.refresh_directory(cx);
                     }
-                }
-                if refresh_pending {
-                    this.refresh_directory(cx);
-                }
-                cx.notify();
+                    cx.notify();
+                });
             });
         });
         browser.read_task = Some(ReadTask {
@@ -436,7 +454,7 @@ impl App {
     }
 
     fn replace_snapshot(&mut self, snapshot: DirectorySnapshot, visible: Vec<usize>) {
-        let browser = &mut self.browser;
+        let browser = &mut self.panes[self.pane_target].browser;
         // 刷新时按路径保留滚动锚点，文件插入或移除后仍能回到附近。
         let scroll = browser.scroll_anchor();
         browser.snapshot_revision += 1;
@@ -454,7 +472,7 @@ impl App {
     }
 
     pub(super) fn take_tab_browse_state(&mut self, search: String) -> TabBrowseState {
-        let browser = &mut self.browser;
+        let browser = &mut self.panes[self.pane_target].browser;
         // 快速切换时，新快照可能还没到，继续保留未恢复的状态。
         if let Some(mut pending) = browser.tab_restore.take() {
             pending.search = search;
@@ -469,7 +487,7 @@ impl App {
     }
 
     fn restore_snapshot_position(&mut self) {
-        let browser = &mut self.browser;
+        let browser = &mut self.panes[self.pane_target].browser;
         if let Some(saved) = browser.tab_restore.take() {
             browser.selection = saved.selection;
             browser.prune_selection(true);
@@ -488,22 +506,23 @@ impl App {
     }
 
     pub(super) fn search_directory(&mut self, query: String, cx: &mut Context<Self>) {
-        if self.browser.query != query {
-            self.browser.query = query;
+        if self.panes[self.pane_target].browser.query != query {
+            self.panes[self.pane_target].browser.query = query;
             self.filter_directory(true, cx);
         }
     }
 
     pub(super) fn set_show_hidden_files(&mut self, show: bool, cx: &mut Context<Self>) {
-        if self.browser.show_hidden != show {
-            self.browser.show_hidden = show;
+        if self.panes[self.pane_target].browser.show_hidden != show {
+            self.panes[self.pane_target].browser.show_hidden = show;
             self.filter_directory(false, cx);
             cx.notify();
         }
     }
 
     fn filter_directory(&mut self, debounce: bool, cx: &mut Context<Self>) {
-        let browser = &mut self.browser;
+        let pane_id = self.panes[self.pane_target].id;
+        let browser = &mut self.panes[self.pane_target].browser;
         let DirectoryState::Ready(directory) = &browser.state else {
             return;
         };
@@ -526,15 +545,18 @@ impl App {
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                if this.browser.snapshot_revision == snapshot_revision {
-                    this.browser.visible = visible;
-                    this.browser.prune_selection(false);
-                    this.browser.filtering = false;
-                    this.browser.scroll = UniformListScrollHandle::new();
-                    this.browser.restore_row = None;
-                    this.restore_snapshot_position();
-                    cx.notify();
-                }
+                this.with_pane(pane_id, |this| {
+                    if this.panes[this.pane_target].browser.snapshot_revision == snapshot_revision {
+                        this.panes[this.pane_target].browser.visible = visible;
+                        this.panes[this.pane_target].browser.prune_selection(false);
+                        this.panes[this.pane_target].browser.filtering = false;
+                        this.panes[this.pane_target].browser.scroll =
+                            UniformListScrollHandle::new();
+                        this.panes[this.pane_target].browser.restore_row = None;
+                        this.restore_snapshot_position();
+                        cx.notify();
+                    }
+                });
             });
         });
         browser.filter_task = Some(ReadTask {
@@ -545,7 +567,7 @@ impl App {
     }
 
     pub(super) fn entry_target(&self, index: usize) -> Option<(PathBuf, EntryKind)> {
-        let entry = self.browser.entry(index)?;
+        let entry = self.panes[self.pane_target].browser.entry(index)?;
         Some((entry.path.clone(), entry.kind))
     }
 
@@ -561,7 +583,9 @@ impl App {
             return;
         };
         if modifiers.shift || modifiers.control {
-            self.browser.select_entry(index, modifiers);
+            self.panes[self.pane_target]
+                .browser
+                .select_entry(index, modifiers);
             cx.notify();
             return;
         }
@@ -578,7 +602,9 @@ impl App {
             self.navigate(path, window, cx);
             return;
         }
-        self.browser.select_entry(index, modifiers);
+        self.panes[self.pane_target]
+            .browser
+            .select_entry(index, modifiers);
         cx.notify();
         if click_count != clicks || !matches!(kind, EntryKind::File | EntryKind::Symlink) {
             return;
@@ -594,8 +620,9 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let navigation_revision = self.navigation_revision;
-        self.browser.action_error = None;
+        let pane_id = self.panes[self.pane_target].id;
+        let navigation_revision = self.panes[self.pane_target].navigation_revision;
+        self.panes[self.pane_target].browser.action_error = None;
         cx.notify();
         let open = cx.background_spawn(async move {
             if kind == EntryKind::Symlink {
@@ -613,17 +640,20 @@ impl App {
         cx.spawn_in(window, async move |this, cx| {
             let result = open.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.navigation_revision != navigation_revision {
-                    return;
-                }
-                match result {
-                    Ok(Some(path)) => this.navigate(path, window, cx),
-                    Ok(None) => {}
-                    Err(error) => {
-                        this.browser.action_error = Some(format!("无法打开：{error}"));
-                        cx.notify();
+                this.with_pane(pane_id, |this| {
+                    if this.panes[this.pane_target].navigation_revision != navigation_revision {
+                        return;
                     }
-                }
+                    match result {
+                        Ok(Some(path)) => this.navigate(path, window, cx),
+                        Ok(None) => {}
+                        Err(error) => {
+                            this.panes[this.pane_target].browser.action_error =
+                                Some(format!("无法打开：{error}"));
+                            cx.notify();
+                        }
+                    }
+                });
             });
         })
         .detach();

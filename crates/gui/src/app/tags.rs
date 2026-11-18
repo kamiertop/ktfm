@@ -171,11 +171,11 @@ impl App {
         match *change {
             TagChange::Details => {}
             TagChange::Loaded => {
-                let navigation = self.navigation_revision;
+                let navigation = self.panes[self.pane_target].navigation_revision;
                 if self.tag_state.read(cx).loaded_tags().is_some() {
                     self.forget_missing_tags(window, cx);
                 }
-                if self.navigation_revision == navigation
+                if self.panes[self.pane_target].navigation_revision == navigation
                     && matches!(self.current_location(), Some(Location::Tag { .. }))
                 {
                     self.load_directory(cx);

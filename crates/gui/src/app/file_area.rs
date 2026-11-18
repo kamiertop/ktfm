@@ -23,8 +23,8 @@ use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::{
-    FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, SIDEBAR_WIDTH,
-    file_selection_color, icon_color,
+    FILE_ICON_SIZE, GRID_ICON_SIZE, GRID_TILE_HEIGHT, GRID_TILE_WIDTH, file_selection_color,
+    icon_color,
 };
 
 const CONTENT_PADDING: Pixels = px(16.);
@@ -41,17 +41,13 @@ fn file_row_height(grid: bool) -> Pixels {
 }
 
 impl App {
-    pub(super) fn file_area(
-        &mut self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn file_area(&mut self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
-        let count = self.browser.visible.len();
-        let grid = self.view_mode == ViewMode::Grid;
-        let content_width =
-            window.viewport_size().width - SIDEBAR_WIDTH - CONTENT_PADDING * 2. - px(2.);
+        let pane_id = self.panes[self.pane_target].id;
+        let count = self.panes[self.pane_target].browser.visible.len();
+        let grid = self.panes[self.pane_target].view_mode == ViewMode::Grid;
+        let content_width = width - CONTENT_PADDING * 2.;
         let columns = if grid {
             ((content_width + GRID_GAP) / (GRID_TILE_WIDTH + GRID_GAP))
                 .floor()
@@ -60,7 +56,7 @@ impl App {
             1
         };
 
-        let (message, status) = match &self.browser.state {
+        let (message, status) = match &self.panes[self.pane_target].browser.state {
             DirectoryState::Unavailable => (Some("无法定位主文件夹".to_owned()), String::new()),
             DirectoryState::Loading => (Some("正在读取目录…".to_owned()), String::new()),
             DirectoryState::Failed(error) => {
@@ -68,9 +64,9 @@ impl App {
             }
             DirectoryState::Ready(snapshot) => {
                 let directory = &snapshot.directory;
-                let message = if self.browser.filtering && count == 0 {
+                let message = if self.panes[self.pane_target].browser.filtering && count == 0 {
                     Some("正在筛选…")
-                } else if count == 0 && self.browser.query.is_empty() {
+                } else if count == 0 && self.panes[self.pane_target].browser.query.is_empty() {
                     Some("没有可显示的项目")
                 } else if count == 0 {
                     Some("没有匹配的项目")
@@ -78,8 +74,11 @@ impl App {
                     None
                 };
                 let mut status = format!("{count} 个项目");
-                if self.browser.selection_len() != 0 {
-                    status.push_str(&format!(" · 已选中 {} 项", self.browser.selection_len()));
+                if self.panes[self.pane_target].browser.selection_len() != 0 {
+                    status.push_str(&format!(
+                        " · 已选中 {} 项",
+                        self.panes[self.pane_target].browser.selection_len()
+                    ));
                 }
                 if let Some(job) = self.file_job {
                     status.push_str(match job {
@@ -90,7 +89,7 @@ impl App {
                         JobKind::Trash => " · 正在移到回收站…",
                     });
                 }
-                if self.browser.filtering {
+                if self.panes[self.pane_target].browser.filtering {
                     status.push_str(" · 正在筛选…");
                 }
                 if directory.read_errors > 0 {
@@ -100,14 +99,16 @@ impl App {
             }
         };
 
-        self.browser.scroll_layout = Some((columns, file_row_height(grid)));
-        if let Some(row) = self.browser.restore_row.take() {
-            self.browser
+        self.panes[self.pane_target].browser.scroll_layout = Some((columns, file_row_height(grid)));
+        if let Some(row) = self.panes[self.pane_target].browser.restore_row.take() {
+            self.panes[self.pane_target]
+                .browser
                 .scroll
                 .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
         }
-        if let Some(row) = self.browser.reveal_row.take() {
-            self.browser
+        if let Some(row) = self.panes[self.pane_target].browser.reveal_row.take() {
+            self.panes[self.pane_target]
+                .browser
                 .scroll
                 .scroll_to_item(row / columns, ScrollStrategy::Nearest);
         }
@@ -121,9 +122,11 @@ impl App {
             .child(
                 div()
                     .id("file-area-entries")
-                    .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                        window.focus(&this.focus, cx);
-                        this.click_file_area_background(event.click_count(), window, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if this.pane().id == pane_id {
+                            window.focus(&this.focus, cx);
+                            this.click_file_area_background(event.click_count(), window, cx);
+                        }
                     }))
                     .relative()
                     .flex_1()
@@ -147,23 +150,28 @@ impl App {
                                     if grid { "file-grid" } else { "file-list" },
                                     count.div_ceil(columns),
                                     cx.processor(move |this, rows: Range<usize>, _, cx| {
-                                        rows.map(|row| this.file_row(row, columns, grid, cx))
-                                            .collect()
+                                        this.with_pane(pane_id, |this| {
+                                            rows.map(|row| this.file_row(row, columns, grid, cx))
+                                                .collect()
+                                        })
+                                        .unwrap_or_default()
                                     }),
                                 )
-                                .track_scroll(&self.browser.scroll)
+                                .track_scroll(&self.panes[self.pane_target].browser.scroll)
                                 .size_full()
                                 .px(CONTENT_PADDING)
                                 .pb(FILE_AREA_BOTTOM_PADDING),
                             )
-                            .vertical_scrollbar(&self.browser.scroll)
+                            .vertical_scrollbar(&self.panes[self.pane_target].browser.scroll)
                     })
                     .map(|area| {
                         if self.location().is_none() && count == 0 {
                             return area.into_any_element();
                         }
                         area.context_menu(move |menu, _, cx| {
-                            if let Some(app) = owner.upgrade() {
+                            if let Some(app) = owner.upgrade()
+                                && app.read(cx).pane().id == pane_id
+                            {
                                 app.read(cx).build_file_background_menu(menu, &owner, cx)
                             } else {
                                 menu
@@ -182,7 +190,8 @@ impl App {
                     .text_sm()
                     .text_color(muted)
                     .child(
-                        self.browser
+                        self.panes[self.pane_target]
+                            .browser
                             .action_error
                             .clone()
                             .or_else(|| self.workspace_error.clone())
@@ -206,7 +215,7 @@ impl App {
             .actions
             .blank_double_click
             .to_command();
-        self.browser.clear_selection();
+        self.panes[self.pane_target].browser.clear_selection();
         cx.notify();
         if click_count != 2 {
             return;
@@ -223,8 +232,9 @@ impl App {
     }
 
     fn path_to_copy(&self) -> Option<PathBuf> {
-        if self.browser.selection_len() == 1 {
-            self.browser
+        if self.panes[self.pane_target].browser.selection_len() == 1 {
+            self.panes[self.pane_target]
+                .browser
                 .selected_entries()
                 .next()
                 .map(|entry| entry.path.clone())
@@ -234,7 +244,7 @@ impl App {
     }
 
     pub(super) fn copy_path_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let label = if self.browser.selection_len() == 1 {
+        let label = if self.panes[self.pane_target].browser.selection_len() == 1 {
             "复制选中文件路径"
         } else {
             "复制当前目录路径"
@@ -243,16 +253,19 @@ impl App {
             "copy-path",
             icon_button("copy-full-path", IconName::Copy, label)
                 .small()
-                .disabled(self.browser.selection_len() != 1 && self.location().is_none())
+                .disabled(
+                    self.panes[self.pane_target].browser.selection_len() != 1
+                        && self.location().is_none(),
+                )
                 .on_click(cx.listener(|this, _, _, cx| {
                     let Some(path) = this.path_to_copy() else {
                         return;
                     };
                     if let Some(text) = path.to_str() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
-                        this.browser.action_error = None;
+                        this.panes[this.pane_target].browser.action_error = None;
                     } else {
-                        this.browser.action_error =
+                        this.panes[this.pane_target].browser.action_error =
                             Some("无法复制路径：文件名不是有效的 UTF-8 文本".into());
                     }
                     cx.notify();
@@ -262,7 +275,7 @@ impl App {
     }
 
     pub(super) fn hidden_files_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let show_hidden = self.browser.show_hidden;
+        let show_hidden = self.panes[self.pane_target].browser.show_hidden;
         let (icon, label) = if show_hidden {
             (IconName::Eye, "隐藏隐藏文件")
         } else {
@@ -275,14 +288,17 @@ impl App {
                 .selected(show_hidden)
                 .toggled(show_hidden)
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.set_show_hidden_files(!this.browser.show_hidden, cx);
+                    this.set_show_hidden_files(
+                        !this.panes[this.pane_target].browser.show_hidden,
+                        cx,
+                    );
                 })),
             label,
         )
     }
 
     pub(super) fn view_switch_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let (mode, icon, label) = match self.view_mode {
+        let (mode, icon, label) = match self.panes[self.pane_target].view_mode {
             ViewMode::List => (ViewMode::Grid, IconName::LayoutGrid, "切换到网格视图"),
             ViewMode::Grid => (ViewMode::List, IconName::Rows3, "切换到列表视图"),
         };
@@ -297,9 +313,9 @@ impl App {
     }
 
     pub(super) fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
-        if self.view_mode != mode {
-            self.view_mode = mode;
-            self.browser.scroll = UniformListScrollHandle::new();
+        if self.panes[self.pane_target].view_mode != mode {
+            self.panes[self.pane_target].view_mode = mode;
+            self.panes[self.pane_target].browser.scroll = UniformListScrollHandle::new();
             cx.notify();
         }
     }
@@ -312,14 +328,15 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let start = row * columns;
-        let end = (start + columns).min(self.browser.visible.len());
+        let end = (start + columns).min(self.panes[self.pane_target].browser.visible.len());
         h_flex()
             .id(("file-row", row))
             .w_full()
             .gap(GRID_GAP)
             .h(file_row_height(grid))
             .children(
-                self.browser
+                self.panes[self.pane_target]
+                    .browser
                     .visible
                     .get(start..end)
                     .unwrap_or_default()
@@ -334,7 +351,7 @@ impl App {
         grid: bool,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        let DirectoryState::Ready(directory) = &self.browser.state else {
+        let DirectoryState::Ready(directory) = &self.panes[self.pane_target].browser.state else {
             return None;
         };
         let file = directory.directory.entries.get(index)?;
@@ -345,7 +362,8 @@ impl App {
         .then(|| file.path.parent())
         .flatten()
         .map(|parent| parent.to_string_lossy().into_owned());
-        let snapshot_revision = self.browser.snapshot_revision;
+        let pane_id = self.panes[self.pane_target].id;
+        let snapshot_revision = self.panes[self.pane_target].browser.snapshot_revision;
         let name = file.name.to_string_lossy().into_owned();
         let (icon, kind) = entry_appearance(file.kind);
         let cut_paths = cx.global::<FileClipboard>().pending_cut_paths();
@@ -354,7 +372,7 @@ impl App {
             (file.kind == EntryKind::Directory).then(|| BookmarkDrag::Folder(file.path.clone()));
         let content_opacity = if pending_cut { PENDING_CUT_OPACITY } else { 1. };
         let owner = cx.weak_entity();
-        let selected = self.browser.is_selected(&file.path);
+        let selected = self.panes[self.pane_target].browser.is_selected(&file.path);
         let theme = cx.theme();
         let hover = theme.list_hover;
         let active = file_selection_color(theme.mode);
@@ -390,7 +408,8 @@ impl App {
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     cx.stop_propagation();
-                    if this.browser.snapshot_revision == snapshot_revision {
+                    if this.pane().id == pane_id
+                        && this.pane().browser.snapshot_revision == snapshot_revision {
                         window.focus(&this.focus, cx);
                         let modifiers = match event {
                             ClickEvent::Mouse(click) => click.down.modifiers,
@@ -402,7 +421,8 @@ impl App {
                 .when(file.kind == EntryKind::Directory, |entry| {
                     entry.on_aux_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         if matches!(event, ClickEvent::Mouse(click) if click.up.button == MouseButton::Middle)
-                            && this.browser.snapshot_revision == snapshot_revision
+                            && this.pane().id == pane_id
+                            && this.pane().browser.snapshot_revision == snapshot_revision
                         {
                             cx.stop_propagation();
                             this.middle_click_folder(index, window, cx);
@@ -442,7 +462,7 @@ impl App {
                     )
                 })
                 .context_menu(move |menu, window, cx| {
-                    Self::build_file_item_menu(snapshot_revision, index, menu, &owner, window, cx)
+                    Self::build_file_item_menu(pane_id, snapshot_revision, index, menu, &owner, window, cx)
                 }),
         )
     }

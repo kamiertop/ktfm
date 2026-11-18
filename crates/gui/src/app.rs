@@ -10,6 +10,7 @@ mod file_operations;
 mod io_queue;
 mod keymap;
 mod menu;
+mod panes;
 mod preferences;
 mod sidebar;
 mod tabs;

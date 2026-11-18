@@ -47,6 +47,7 @@ impl App {
     }
 
     pub(super) fn build_file_item_menu(
+        pane_id: uuid::Uuid,
         snapshot_revision: u64,
         index: usize,
         menu: PopupMenu,
@@ -59,7 +60,7 @@ impl App {
         };
         let app = entity.read(cx);
         // 切换目录后虚拟列表会复用索引，过期的卡片事件不能作用到新目录。
-        if app.browser.snapshot_revision != snapshot_revision {
+        if app.pane().id != pane_id || app.pane().browser.snapshot_revision != snapshot_revision {
             return menu;
         }
         let Some((path, kind)) = app.entry_target(index) else {
@@ -67,15 +68,19 @@ impl App {
         };
 
         entity.update(cx, |app, cx| {
-            if app.browser.select_for_context_menu(index) {
+            if app.panes[app.pane_target]
+                .browser
+                .select_for_context_menu(index)
+            {
                 cx.notify();
             }
         });
         let app = entity.read(cx);
         let unavailable = app.file_job.is_some() || kind == EntryKind::Missing;
-        let multiple = app.browser.selection_len() > 1;
+        let multiple = app.pane().browser.selection_len() > 1;
         let target = FileMenuTarget {
-            navigation_revision: app.navigation_revision,
+            pane_id,
+            navigation_revision: app.pane().navigation_revision,
             path: Some(path.clone()),
         };
         let paste_target = (kind == EntryKind::Directory).then_some(index);
@@ -118,14 +123,17 @@ impl App {
         });
         menu = menu.separator();
         if kind == EntryKind::Directory {
-            let target = Location::directory(path.clone());
+            let location = Location::directory(path.clone());
+            let revision = target.navigation_revision;
             menu = menu
                 .item(app_menu_item(
                     owner,
                     "在新标签页打开",
                     IconName::FolderOpen,
                     move |app, window, cx| {
-                        app.new_tab(Some(target.clone()), window, cx);
+                        if app.pane().id == pane_id && app.pane().navigation_revision == revision {
+                            app.new_tab(Some(location.clone()), window, cx);
+                        }
                     },
                 ))
                 .item(external_terminal_item(path.clone(), owner))
@@ -186,11 +194,15 @@ impl App {
         owner: &WeakEntity<Self>,
         cx: &gpui_kit::App,
     ) -> PopupMenu {
-        if !matches!(self.browser.state, DirectoryState::Ready(_)) {
+        if !matches!(
+            self.panes[self.pane_target].browser.state,
+            DirectoryState::Ready(_)
+        ) {
             return menu;
         }
         let target = FileMenuTarget {
-            navigation_revision: self.navigation_revision,
+            pane_id: self.panes[self.pane_target].id,
+            navigation_revision: self.panes[self.pane_target].navigation_revision,
             path: None,
         };
         let directory = self.location();
@@ -210,7 +222,7 @@ impl App {
                 ));
             }
         }
-        if !self.browser.visible.is_empty() {
+        if !self.panes[self.pane_target].browser.visible.is_empty() {
             menu = menu.item(file_menu_item(
                 "全选",
                 IconName::ListChecks,

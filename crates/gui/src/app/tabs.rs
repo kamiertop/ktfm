@@ -6,7 +6,7 @@ use gpui_kit::component::{ActiveTheme, Icon, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::command::AppCommand;
-use settings::config::tab::{Location, Session, TabItem};
+use settings::config::tab::{GridSession, Location, PaneSession, Session, TabItem};
 use settings::config::workspace::Workspace;
 use settings::tag::Tag;
 use uuid::Uuid;
@@ -16,7 +16,6 @@ use super::browser::TabBrowseState;
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, truncated_text, with_tooltip};
-use crate::style::SIDEBAR_WIDTH;
 
 const TAB_BAR_PADDING: Pixels = px(8.);
 const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
@@ -56,8 +55,22 @@ pub(super) fn restore_tabs(
     tags: Option<&Tag>,
     home: Option<PathBuf>,
 ) -> (Vec<BrowserTab>, usize) {
+    restore_tab_items(
+        &workspace.session.tabs,
+        workspace.session.active,
+        tags,
+        home,
+    )
+}
+
+pub(super) fn restore_tab_items(
+    items: &[TabItem],
+    active: Option<Uuid>,
+    tags: Option<&Tag>,
+    home: Option<PathBuf>,
+) -> (Vec<BrowserTab>, usize) {
     let mut tabs = Vec::new();
-    for item in &workspace.session.tabs {
+    for item in items {
         let valid = match &item.location {
             Location::Directory { path } => path.0.is_absolute(),
             Location::Tag { id } => tags.is_none_or(|tags| tags.get(*id).is_some()),
@@ -74,14 +87,14 @@ pub(super) fn restore_tabs(
     }
     let active = tabs
         .iter()
-        .position(|tab| Some(tab.id) == workspace.session.active)
+        .position(|tab| Some(tab.id) == active)
         .unwrap_or(0);
     (tabs, active)
 }
 
 impl App {
     pub(super) fn current_location(&self) -> Option<&Location> {
-        self.tabs[self.active_tab].location()
+        self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab].location()
     }
 
     pub(super) fn location(&self) -> Option<&Path> {
@@ -121,29 +134,33 @@ impl App {
         if self.current_location() == Some(&location) {
             return;
         }
-        self.tabs[self.active_tab].visit(location);
+        let pane = &mut self.panes[self.pane_target];
+        pane.tabs[pane.active_tab].visit(location);
         self.location_changed(window, cx);
     }
 
     pub(super) fn can_go_back(&self) -> bool {
-        self.tabs[self.active_tab].index > 0
+        let pane = &self.panes[self.pane_target];
+        pane.tabs[pane.active_tab].index > 0
     }
 
     pub(super) fn can_go_forward(&self) -> bool {
-        let tab = &self.tabs[self.active_tab];
+        let tab = &self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab];
         tab.index + 1 < tab.history.len()
     }
 
     pub(super) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_go_back() {
-            self.tabs[self.active_tab].index -= 1;
+            let pane = &mut self.panes[self.pane_target];
+            pane.tabs[pane.active_tab].index -= 1;
             self.location_changed(window, cx);
         }
     }
 
     pub(super) fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_go_forward() {
-            self.tabs[self.active_tab].index += 1;
+            let pane = &mut self.panes[self.pane_target];
+            pane.tabs[pane.active_tab].index += 1;
             self.location_changed(window, cx);
         }
     }
@@ -155,34 +172,43 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         self.remember_active_tab(cx);
-        self.tabs.push(BrowserTab::new(Uuid::new_v4(), location));
-        self.active_tab = self.tabs.len() - 1;
+        self.panes[self.pane_target]
+            .tabs
+            .push(BrowserTab::new(Uuid::new_v4(), location));
+        self.panes[self.pane_target].active_tab = self.panes[self.pane_target].tabs.len() - 1;
         window.focus(&self.focus, cx);
         self.activate_tab(window, cx);
     }
 
     fn switch_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index < self.tabs.len() && index != self.active_tab {
+        if index < self.panes[self.pane_target].tabs.len()
+            && index != self.panes[self.pane_target].active_tab
+        {
             self.remember_active_tab(cx);
-            self.active_tab = index;
+            self.panes[self.pane_target].active_tab = index;
             window.focus(&self.focus, cx);
             self.activate_tab(window, cx);
         }
     }
 
     pub(super) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.len() <= 1 || index >= self.tabs.len() {
+        if index >= self.panes[self.pane_target].tabs.len() {
             return;
         }
-        self.tabs.remove(index);
-        match index.cmp(&self.active_tab) {
+        if self.panes[self.pane_target].tabs.len() == 1 {
+            self.close_empty_pane(window, cx);
+            return;
+        }
+        self.panes[self.pane_target].tabs.remove(index);
+        match index.cmp(&self.panes[self.pane_target].active_tab) {
             std::cmp::Ordering::Equal => {
-                self.active_tab = index.min(self.tabs.len() - 1);
+                self.panes[self.pane_target].active_tab =
+                    index.min(self.panes[self.pane_target].tabs.len() - 1);
                 window.focus(&self.focus, cx);
                 self.activate_tab(window, cx);
                 return;
             }
-            std::cmp::Ordering::Less => self.active_tab -= 1,
+            std::cmp::Ordering::Less => self.panes[self.pane_target].active_tab -= 1,
             std::cmp::Ordering::Greater => {}
         }
         self.save_workspace(cx);
@@ -197,7 +223,7 @@ impl App {
         let Some(tags) = state.read(cx).loaded_tags() else {
             return;
         };
-        let missing = self
+        let missing = self.panes[self.pane_target]
             .tabs
             .iter()
             .flat_map(|tab| &tab.history)
@@ -223,7 +249,7 @@ impl App {
     ) {
         let was_active = self.current_location().is_some_and(&removed);
         let home = self.home().map(|path| Location::directory(path.to_owned()));
-        for tab in &mut self.tabs {
+        for tab in &mut self.panes[self.pane_target].tabs {
             if tab.location().is_some_and(&removed) {
                 tab.browse_state = None;
             }
@@ -244,23 +270,32 @@ impl App {
         }
     }
 
-    fn remember_active_tab(&mut self, cx: &Context<Self>) {
+    pub(super) fn remember_active_tab(&mut self, cx: &Context<Self>) {
         if cx.global::<ActivePreferences>().0.view.remember_tab_state {
-            let search = self.search.read(cx).value().to_string();
-            self.tabs[self.active_tab].browse_state = Some(self.take_tab_browse_state(search));
+            let search = self.panes[self.pane_target]
+                .search
+                .read(cx)
+                .value()
+                .to_string();
+            let state = self.take_tab_browse_state(search);
+            let pane = &mut self.panes[self.pane_target];
+            pane.tabs[pane.active_tab].browse_state = Some(state);
         }
     }
 
     pub(super) fn clear_saved_tab_states(&mut self) {
-        for tab in &mut self.tabs {
-            tab.browse_state = None;
+        for pane in &mut self.panes {
+            for tab in &mut pane.tabs {
+                tab.browse_state = None;
+            }
+            pane.browser.tab_restore = None;
+            pane.browser.restore_row = None;
         }
-        self.browser.tab_restore = None;
-        self.browser.restore_row = None;
     }
 
     fn activate_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let saved = self.tabs[self.active_tab].browse_state.take();
+        let pane = &mut self.panes[self.pane_target];
+        let saved = pane.tabs[pane.active_tab].browse_state.take();
         self.change_browser_location(saved, window, cx);
     }
 
@@ -274,13 +309,13 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.navigation_revision += 1;
+        self.panes[self.pane_target].navigation_revision += 1;
         let search = saved.as_ref().map_or("", |state| state.search.as_str());
-        self.browser.query = search.trim().to_lowercase();
-        self.search.update(cx, |input, cx| {
+        self.panes[self.pane_target].browser.query = search.trim().to_lowercase();
+        self.panes[self.pane_target].search.update(cx, |input, cx| {
             input.set_value(search, window, cx);
         });
-        self.browser.tab_restore = saved;
+        self.panes[self.pane_target].browser.tab_restore = saved;
         self.load_directory(cx);
         self.save_workspace(cx);
     }
@@ -288,8 +323,8 @@ impl App {
     pub(super) fn save_workspace(&mut self, cx: &mut Context<Self>) {
         // 只有主窗口的标签页写入会话。
         if self.persist_session && self.workspace_writable {
-            let session = Session {
-                tabs: self
+            let snapshot = |pane: &super::panes::BrowserPane| PaneSession {
+                tabs: pane
                     .tabs
                     .iter()
                     .filter_map(|tab| {
@@ -299,7 +334,19 @@ impl App {
                         })
                     })
                     .collect(),
-                active: Some(self.tabs[self.active_tab].id),
+                active: Some(pane.tabs[pane.active_tab].id),
+            };
+            let mut panes = self.ordered_panes().map(snapshot);
+            let first = panes.next().expect("主窗格存在");
+            let session = Session {
+                tabs: first.tabs,
+                active: first.active,
+                split: None,
+                grid: (self.panes.len() > 1).then(|| GridSession {
+                    columns: self.pane_layout.columns.clone(),
+                    panes: panes.collect(),
+                    active_index: self.active_pane,
+                }),
             };
             cx.global::<WorkspaceWriter>()
                 .clone()
@@ -313,7 +360,7 @@ impl App {
     }
 
     pub(super) fn show_tab_bar(&self) -> bool {
-        self.tabs.len() > 1
+        self.panes[self.pane_target].tabs.len() > 1
     }
 
     pub(super) fn new_tab_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -331,7 +378,7 @@ impl App {
 
     pub(super) fn tab_bar(
         &self,
-        window: &Window,
+        width: Pixels,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme();
@@ -341,9 +388,8 @@ impl App {
         } else {
             0xa391af
         });
-        let available =
-            window.viewport_size().width - SIDEBAR_WIDTH - TAB_BAR_PADDING * 2. - px(2.);
-        let share = available.max(px(0.)) / self.tabs.len() as f32;
+        let available = width - TAB_BAR_PADDING * 2.;
+        let share = available.max(px(0.)) / self.panes[self.pane_target].tabs.len() as f32;
         let show_icon = share >= px(68.);
         let show_close = share >= px(116.);
         let divider = rgb(if theme.mode.is_dark() {
@@ -365,99 +411,109 @@ impl App {
             .px(TAB_BAR_PADDING)
             .overflow_hidden()
             .child(tab_outline(
-                self.active_tab,
-                self.tabs.len(),
+                self.panes[self.pane_target].active_tab,
+                self.panes[self.pane_target].tabs.len(),
                 outline,
                 divider,
             ))
-            .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                let (name, icon) = self.location_appearance(tab.location(), cx);
-                let tooltip: SharedString = match tab.location() {
-                    Some(Location::Directory { path }) => {
-                        path.0.to_string_lossy().into_owned().into()
-                    }
-                    _ => name.clone().into(),
-                };
-                let selected = index == self.active_tab;
-                let id = tab.id;
-                h_flex()
-                    .id(SharedString::from(id.to_string()))
-                    .relative()
-                    .h_9()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_color(if selected { foreground } else { muted })
-                    .when(!selected, |tab| {
-                        tab.hover(|style| style.text_color(foreground).font_semibold())
-                    })
-                    .when(selected, |tab| tab.text_color(active_text).font_semibold())
-                    .on_mouse_up(
-                        MouseButton::Middle,
-                        cx.listener(move |this, _, window, cx| {
-                            match cx
-                                .global::<ActivePreferences>()
-                                .0
-                                .actions
-                                .middle_click_tab
-                                .to_command()
-                            {
-                                Some(AppCommand::CloseCurrentTab) => {
-                                    this.close_tab(index, window, cx)
-                                }
-                                Some(AppCommand::DuplicateCurrentTab) => {
-                                    if let Some(tab) = this.tabs.get(index) {
-                                        this.new_tab(tab.location().cloned(), window, cx);
-                                    }
-                                }
-                                _ => {}
+            .children(
+                self.panes[self.pane_target]
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        let (name, icon) = self.location_appearance(tab.location(), cx);
+                        let tooltip: SharedString = match tab.location() {
+                            Some(Location::Directory { path }) => {
+                                path.0.to_string_lossy().into_owned().into()
                             }
-                        }),
-                    )
-                    .child(
+                            _ => name.clone().into(),
+                        };
+                        let selected = index == self.panes[self.pane_target].active_tab;
+                        let id = tab.id;
                         h_flex()
-                            .id("select-tab")
-                            .size_full()
+                            .id(SharedString::from(id.to_string()))
+                            .relative()
+                            .h_9()
+                            .flex_1()
                             .min_w_0()
-                            .justify_center()
-                            .px(if show_close { px(38.) } else { px(7.) })
-                            .gap_1p5()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.switch_tab(index, window, cx);
-                            }))
-                            .when(show_icon, |label| {
-                                label.child(Icon::new(icon).size(px(15.)).flex_shrink_0())
+                            .overflow_hidden()
+                            .text_color(if selected { foreground } else { muted })
+                            .when(!selected, |tab| {
+                                tab.hover(|style| style.text_color(foreground).font_semibold())
                             })
+                            .when(selected, |tab| tab.text_color(active_text).font_semibold())
+                            .on_mouse_up(
+                                MouseButton::Middle,
+                                cx.listener(move |this, _, window, cx| {
+                                    match cx
+                                        .global::<ActivePreferences>()
+                                        .0
+                                        .actions
+                                        .middle_click_tab
+                                        .to_command()
+                                    {
+                                        Some(AppCommand::CloseCurrentTab) => {
+                                            this.close_tab(index, window, cx)
+                                        }
+                                        Some(AppCommand::DuplicateCurrentTab) => {
+                                            if let Some(tab) =
+                                                this.panes[this.pane_target].tabs.get(index)
+                                            {
+                                                this.new_tab(tab.location().cloned(), window, cx);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }),
+                            )
                             .child(
-                                div()
+                                h_flex()
+                                    .id("select-tab")
+                                    .size_full()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .child(truncated_text(name.into(), tooltip)),
-                            ),
-                    )
-                    .when(show_close, |tab| {
-                        tab.child(
-                            h_flex()
-                                .id("close-tab")
-                                .absolute()
-                                .right(px(15.))
-                                .top(px(7.))
-                                .size(px(22.))
-                                .justify_center()
-                                .rounded_full()
-                                .cursor_pointer()
-                                .hover(move |style| {
-                                    style.bg(active_text.opacity(0.13)).text_color(active_text)
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.close_tab(index, window, cx);
-                                }))
-                                .child(Icon::new(IconName::X).size(px(14.))),
-                        )
-                    })
-            }))
+                                    .justify_center()
+                                    .px(if show_close { px(38.) } else { px(7.) })
+                                    .gap_1p5()
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.switch_tab(index, window, cx);
+                                    }))
+                                    .when(show_icon, |label| {
+                                        label.child(Icon::new(icon).size(px(15.)).flex_shrink_0())
+                                    })
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_sm()
+                                            .child(truncated_text(name.into(), tooltip)),
+                                    ),
+                            )
+                            .when(show_close, |tab| {
+                                tab.child(
+                                    h_flex()
+                                        .id("close-tab")
+                                        .absolute()
+                                        .right(px(15.))
+                                        .top(px(7.))
+                                        .size(px(22.))
+                                        .justify_center()
+                                        .rounded_full()
+                                        .cursor_pointer()
+                                        .hover(move |style| {
+                                            style
+                                                .bg(active_text.opacity(0.13))
+                                                .text_color(active_text)
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.close_tab(index, window, cx);
+                                        }))
+                                        .child(Icon::new(IconName::X).size(px(14.))),
+                                )
+                            })
+                    }),
+            )
     }
 }
 

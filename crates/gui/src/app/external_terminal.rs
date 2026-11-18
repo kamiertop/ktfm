@@ -39,8 +39,9 @@ impl App {
             .terminal
             .external_program
             .clone();
-        self.browser.action_error = None;
-        let revision = self.navigation_revision;
+        self.panes[self.pane_target].browser.action_error = None;
+        let pane_id = self.pane().id;
+        let revision = self.pane().navigation_revision;
         let launch =
             cx.background_spawn(async move { sys::opener::open_terminal(&directory, &program) });
         cx.spawn(async move |this, cx| {
@@ -53,10 +54,13 @@ impl App {
                 }
                 Err(error) => {
                     let _ = this.update(cx, |this, cx| {
-                        if this.navigation_revision == revision {
-                            this.browser.action_error = Some(format!("无法启动外部终端：{error}"));
-                            cx.notify();
-                        }
+                        this.with_pane(pane_id, |this| {
+                            if this.pane().navigation_revision == revision {
+                                this.panes[this.pane_target].browser.action_error =
+                                    Some(format!("无法启动外部终端：{error}"));
+                                cx.notify();
+                            }
+                        });
                     });
                 }
             }

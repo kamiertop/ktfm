@@ -101,7 +101,7 @@ impl std::borrow::Borrow<Path> for SavedPath {
 mod tests {
     use super::*;
     use crate::config::bookmark::BookmarkKind;
-    use crate::config::tab::{Location, TabItem};
+    use crate::config::tab::{Location, SplitLayout, TabItem};
 
     use uuid::Uuid;
 
@@ -192,6 +192,81 @@ mod tests {
         })();
         fs::remove_dir_all(dir)?;
         result
+    }
+
+    #[test]
+    fn restores_third_pane_and_its_active_position() -> Result<()> {
+        let id = Uuid::new_v4();
+        let content = format!(
+            "[session.split]\ntabs = []\nright_active = true\nratio = 0.3\nlayout = \"stacked\"\n\n\
+             [session.split.third]\nactive = \"{id}\"\nactive_index = 2\nmiddle_ratio = 0.4\n\n\
+             [[session.split.third.tabs]]\nid = \"{id}\"\nlocation = {{ kind = \"directory\", path = \"/tmp\" }}\n",
+        );
+        let workspace: Workspace = toml::from_str(&content)?;
+        let restored: Workspace = toml::from_str(&toml::to_string_pretty(&workspace)?)?;
+        let split = restored.session.split.unwrap();
+        assert_eq!(split.layout, SplitLayout::Stacked);
+        assert_eq!(split.ratio, 0.3);
+        let third = split.third.unwrap();
+        assert_eq!(third.active, Some(id));
+        assert_eq!(third.active_index, 2);
+        assert_eq!(third.middle_ratio, 0.4);
+        assert_eq!(third.tabs[0].location, Location::directory("/tmp".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn restores_six_panes_with_independent_column_splits() -> Result<()> {
+        use crate::config::tab::{GridSession, PaneColumn, PaneSession};
+
+        let pane = |index| {
+            let id = Uuid::new_v4();
+            PaneSession {
+                tabs: vec![TabItem {
+                    id,
+                    location: Location::directory(format!("/pane/{index}").into()),
+                }],
+                active: Some(id),
+            }
+        };
+        let first = pane(0);
+        let mut workspace = Workspace::default();
+        workspace.session.tabs = first.tabs;
+        workspace.session.active = first.active;
+        workspace.session.grid = Some(GridSession {
+            columns: [(2, [2, 1], 0.35), (2, [1, 1], 0.5), (1, [1, 1], 0.75)]
+                .into_iter()
+                .map(|(rows, row_panes, top_ratio)| PaneColumn {
+                    rows,
+                    row_panes,
+                    width_ratio: 1. / 3.,
+                    top_ratio,
+                    ..PaneColumn::default()
+                })
+                .collect(),
+            panes: (1..6).map(pane).collect(),
+            active_index: 5,
+        });
+
+        let restored: Workspace = toml::from_str(&toml::to_string_pretty(&workspace)?)?;
+        assert_eq!(restored.session.active, first.active);
+        let grid = restored.session.grid.unwrap();
+        assert_eq!(grid.active_index, 5);
+        assert_eq!(
+            grid.columns
+                .iter()
+                .map(|column| column.top_ratio)
+                .collect::<Vec<_>>(),
+            [0.35, 0.5, 0.75]
+        );
+        assert_eq!(grid.columns[0].row_panes, [2, 1]);
+        assert_eq!(grid.columns[0].pane_count(), 3);
+        assert_eq!(grid.panes.len(), 5);
+        assert_eq!(
+            grid.panes[4].tabs[0].location,
+            Location::directory("/pane/5".into())
+        );
+        Ok(())
     }
 
     #[test]

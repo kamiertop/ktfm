@@ -174,6 +174,7 @@ pub(super) struct DirectoryProperties {
 
 #[derive(Clone)]
 pub(super) struct FileMenuTarget {
+    pub(super) pane_id: uuid::Uuid,
     pub(super) navigation_revision: u64,
     pub(super) path: Option<PathBuf>,
 }
@@ -209,7 +210,10 @@ impl App {
         !clipboard.paths.is_empty()
             && !clipboard.pasting
             && !self.file_job.is_some()
-            && matches!(self.browser.state, DirectoryState::Ready(_))
+            && matches!(
+                self.panes[self.pane_target].browser.state,
+                DirectoryState::Ready(_)
+            )
     }
 
     fn paste_directory(&self, entry: Option<usize>) -> Option<PathBuf> {
@@ -240,15 +244,23 @@ impl App {
         }
         let mut menu_entry = None;
         if let Some(target) = menu_target {
-            if target.navigation_revision != self.navigation_revision {
+            if target.pane_id != self.panes[self.pane_target].id
+                || target.navigation_revision != self.panes[self.pane_target].navigation_revision
+            {
                 return;
             }
             if let Some(path) = &target.path {
-                let Some(index) = self.browser.visible_entry_index(path) else {
+                let Some(index) = self.panes[self.pane_target]
+                    .browser
+                    .visible_entry_index(path)
+                else {
                     return;
                 };
                 menu_entry = Some(index);
-                if self.browser.select_for_context_menu(index) {
+                if self.panes[self.pane_target]
+                    .browser
+                    .select_for_context_menu(index)
+                {
                     cx.notify();
                 }
             }
@@ -256,13 +268,15 @@ impl App {
         window.focus(&self.focus, cx);
         match action {
             FileAction::SelectAll => {
-                self.browser.select_all();
+                self.panes[self.pane_target].browser.select_all();
                 cx.notify();
             }
             FileAction::Properties => self.open_directory_properties(window, cx),
             FileAction::NewFolder | FileAction::NewDocument => {
-                if matches!(self.browser.state, DirectoryState::Ready(_))
-                    && let Some(path) = self.location()
+                if matches!(
+                    self.panes[self.pane_target].browser.state,
+                    DirectoryState::Ready(_)
+                ) && let Some(path) = self.location()
                 {
                     let folder = matches!(action, FileAction::NewFolder);
                     self.edit_file_name(
@@ -281,10 +295,13 @@ impl App {
                 }
             }
             FileAction::Rename => {
-                if self.browser.selection_len() != 1 {
+                if self.panes[self.pane_target].browser.selection_len() != 1 {
                     return;
                 }
-                let entry = self.browser.selected_entries().next();
+                let entry = self.panes[self.pane_target]
+                    .browser
+                    .selected_entries()
+                    .next();
                 if let Some(entry) = entry.filter(|entry| entry.kind != EntryKind::Missing) {
                     let path = entry.path.clone();
                     let name = path
@@ -296,7 +313,7 @@ impl App {
                 }
             }
             FileAction::Cut | FileAction::Copy | FileAction::Trash => {
-                let paths: Vec<_> = self
+                let paths: Vec<_> = self.panes[self.pane_target]
                     .browser
                     .selected_entries()
                     .filter(|entry| entry.kind != EntryKind::Missing)
@@ -312,7 +329,7 @@ impl App {
                     clipboard.revision += 1;
                     clipboard.paths = paths.into();
                     clipboard.cut = matches!(action, FileAction::Cut);
-                    self.browser.action_error = None;
+                    self.panes[self.pane_target].browser.action_error = None;
                     cx.notify();
                 }
             }
@@ -420,11 +437,12 @@ impl App {
         self.file_job = Some(kind);
         cx.global_mut::<FileJobs>().running += 1;
         let clipboard_revision = cx.global::<FileClipboard>().revision;
-        self.browser.action_error = None;
+        self.panes[self.pane_target].browser.action_error = None;
         if let Some(editor) = &mut self.file_name_editor {
             editor.error = None;
         }
-        let navigation_revision = self.navigation_revision;
+        let pane_id = self.panes[self.pane_target].id;
+        let navigation_revision = self.panes[self.pane_target].navigation_revision;
         let named_job = matches!(kind, JobKind::Create | JobKind::Rename);
         let work = cx.background_spawn(async move { job.run() });
         let app_context = cx.to_async();
@@ -439,44 +457,57 @@ impl App {
             });
             let _ = this.update_in(cx, |this, window, cx| {
                 this.file_job = None;
-                let still_here = this.navigation_revision == navigation_revision;
-                let mut failures = outcome.items.iter().filter_map(|item| {
-                    let error = item.result.as_ref().err()?;
-                    Some((item, error))
-                });
-                if let Some((item, error)) = failures.next() {
-                    let failure_count = 1 + failures.count();
-                    let path = item.target.as_ref().or(item.source.as_ref());
-                    let error = match path {
-                        Some(path) if error.kind() == io::ErrorKind::AlreadyExists => {
-                            format!("已存在同名项目：{}", path.display())
-                        }
-                        Some(path) => format!("{}：{error}", path.display()),
-                        None => error.to_string(),
-                    };
-                    if named_job && let Some(editor) = &mut this.file_name_editor {
-                        editor.error = Some(error);
-                        editor.input.update(cx, |input, cx| input.focus(window, cx));
-                    } else {
-                        this.browser.action_error =
-                            Some(format!("{} 项操作失败 · {error}", failure_count));
-                        this.refresh_after_file_operation(None, cx);
-                    }
+                this.refresh_other_job_panes(pane_id, navigation_revision, &outcome, cx);
+                let error_target = if this.panes.iter().any(|pane| pane.id == pane_id) {
+                    pane_id
                 } else {
-                    if named_job && this.file_name_editor.is_some() {
-                        this.close_file_name(window, cx);
-                    }
-                    let reveal = if named_job && still_here {
-                        outcome
-                            .items
-                            .into_iter()
-                            .next()
-                            .and_then(|item| item.target)
+                    this.panes[this.active_pane].id
+                };
+                this.with_pane(error_target, |this| {
+                    let still_here = error_target == pane_id
+                        && this.panes[this.pane_target].navigation_revision == navigation_revision;
+                    let mut failures = outcome.items.iter().filter_map(|item| {
+                        let error = item.result.as_ref().err()?;
+                        Some((item, error))
+                    });
+                    if let Some((item, error)) = failures.next() {
+                        let failure_count = 1 + failures.count();
+                        let path = item.target.as_ref().or(item.source.as_ref());
+                        let error = match path {
+                            Some(path) if error.kind() == io::ErrorKind::AlreadyExists => {
+                                format!("已存在同名项目：{}", path.display())
+                            }
+                            Some(path) => format!("{}：{error}", path.display()),
+                            None => error.to_string(),
+                        };
+                        if named_job && let Some(editor) = &mut this.file_name_editor {
+                            editor.error = Some(error);
+                            editor.input.update(cx, |input, cx| input.focus(window, cx));
+                        } else {
+                            this.panes[this.pane_target].browser.action_error =
+                                Some(format!("{} 项操作失败 · {error}", failure_count));
+                            if still_here {
+                                this.refresh_after_file_operation(None, cx);
+                            }
+                        }
                     } else {
-                        None
-                    };
-                    this.refresh_after_file_operation(reveal, cx);
-                }
+                        if named_job && this.file_name_editor.is_some() {
+                            this.close_file_name(window, cx);
+                        }
+                        let reveal = if named_job && still_here {
+                            outcome
+                                .items
+                                .into_iter()
+                                .next()
+                                .and_then(|item| item.target)
+                        } else {
+                            None
+                        };
+                        if still_here {
+                            this.refresh_after_file_operation(reveal, cx);
+                        }
+                    }
+                });
                 cx.notify();
             });
         })
@@ -484,8 +515,50 @@ impl App {
         cx.notify();
     }
 
+    fn refresh_other_job_panes(
+        &mut self,
+        origin: uuid::Uuid,
+        revision: u64,
+        outcome: &JobResult,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<_> = outcome
+            .items
+            .iter()
+            .flat_map(|item| {
+                [item.source.as_deref(), item.target.as_deref()]
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        for index in 0..self.panes.len() {
+            let pane = &self.panes[index];
+            if pane.id == origin && pane.navigation_revision == revision {
+                continue;
+            }
+            self.with_pane(pane.id, |this| {
+                use settings::config::tab::Location;
+
+                let affected = match this.current_location() {
+                    Some(Location::Directory { path }) => paths.iter().any(|changed| {
+                        changed.parent() == Some(path.0.as_path()) || path.0.starts_with(changed)
+                    }),
+                    Some(Location::Tag { .. }) => true,
+                    None => false,
+                };
+                if affected {
+                    this.refresh_directory(cx);
+                }
+            });
+        }
+    }
+
     fn open_directory_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(path), DirectoryState::Ready(snapshot)) = (self.location(), &self.browser.state)
+        let (Some(path), DirectoryState::Ready(snapshot)) =
+            (self.location(), &self.panes[self.pane_target].browser.state)
         else {
             return;
         };

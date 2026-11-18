@@ -1,10 +1,12 @@
 use settings::config::bookmark::BookmarkKind;
+use settings::config::tab::SplitLayout;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{Disableable, Icon, h_flex};
 use gpui_kit::*;
 
+use super::preferences::ActivePreferences;
 use crate::app::App;
 use crate::components::{icon_button, title_bar, with_tooltip};
 use crate::style::{SEARCH_MAX_WIDTH, TITLE_ICON_SIZE};
@@ -88,17 +90,69 @@ impl App {
                     .max_w(SEARCH_MAX_WIDTH)
                     .ml_2()
                     .child(
-                        Input::new(&self.search)
+                        Input::new(&self.pane().search)
                             .prefix(Icon::new(IconName::Search).size(TITLE_ICON_SIZE))
                             .cleanable(true),
                     ),
             );
+
+        let shortcuts = &cx.global::<ActivePreferences>().0.shortcuts;
+        let split_button = |layout, id, icon, open_label: &'static str, shortcut: &str| {
+            let can_split = self.can_split(layout);
+            let merge_label = match layout {
+                SplitLayout::SideBySide if !can_split && self.can_merge_horizontal() => {
+                    Some("合并左右分栏")
+                }
+                SplitLayout::Stacked if self.can_merge_vertical() => Some("合并当前列"),
+                _ => None,
+            };
+            let merge = merge_label.is_some();
+            let (label, shortcut) = if let Some(label) = merge_label {
+                (label, "")
+            } else {
+                (open_label, shortcut)
+            };
+            let tooltip = if shortcut.is_empty() {
+                label.to_owned()
+            } else {
+                format!("{label} ({shortcut})")
+            };
+            with_tooltip(
+                icon_button(id, icon, label)
+                    .disabled(!can_split && !merge)
+                    .toggled(merge)
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| match (layout, merge) {
+                            (SplitLayout::SideBySide, true) => this.merge_horizontal(window, cx),
+                            (SplitLayout::Stacked, true) => this.merge_current_column(window, cx),
+                            _ => this.open_split(layout, true, window, cx),
+                        }),
+                    ),
+                tooltip,
+            )
+        };
+        let split_controls = h_flex()
+            .child(split_button(
+                SplitLayout::SideBySide,
+                "split-right",
+                IconName::Columns3,
+                "左右分栏",
+                &shortcuts.split_pane,
+            ))
+            .child(split_button(
+                SplitLayout::Stacked,
+                "split-down",
+                IconName::Rows2,
+                "上下分栏",
+                &shortcuts.split_down,
+            ));
 
         // 两处拖拽区独立记录按下状态，区外点击只清除对应区域的状态。
         let title_drag = window.use_state(cx, |_, _| false);
         let toolbar_drag = window.use_state(cx, |_, _| false);
         title_bar(
             navigation,
+            split_controls,
             radius,
             cx.listener(|this, _, _, cx| this.open_preferences(cx)),
             window,

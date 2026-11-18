@@ -1,22 +1,26 @@
 use std::path::PathBuf;
 
-use gpui_kit::component::input::InputState;
+use super::panes::{BrowserPane, PaneLayout};
 use gpui_kit::component::{ActiveTheme, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::{
-    AppConfig, bookmark::Bookmarks, tab::Location, view::ViewMode, workspace::Workspace,
+    AppConfig,
+    bookmark::Bookmarks,
+    tab::{Location, SplitLayout},
+    workspace::Workspace,
 };
 
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
-use super::browser::Browser;
-use super::embed_terminal::TerminalResize;
 use super::file_operations::{
     DirectoryProperties, FileAction, FileClipboard, FileJobs, FileNameEditor,
 };
 use super::io_queue::IoQueue;
 use super::keymap;
-use super::keymap::{CloseTab, NewTab, OpenPreferences, OpenTerminal};
+use super::keymap::{
+    ClosePane, CloseTab, NewTab, OpenPreferences, OpenTerminal, PaneDown, PaneLeft, PaneRight,
+    PaneUp, SplitDown, SplitLeft, SplitPane, SplitUp,
+};
 use super::preferences::{ActivePreferences, Preferences};
 use super::tabs::{BrowserTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
@@ -31,13 +35,14 @@ use settings::config::general::StartupBehavior;
 
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
+    pub(super) panes: Vec<BrowserPane>,
+    pub(super) pane_target: usize,
+    pub(super) active_pane: usize,
+    pub(super) pane_layout: PaneLayout,
     pub(super) focus: FocusHandle,
     pub(super) file_job: Option<daemon::job::JobKind>,
     pub(super) file_name_editor: Option<FileNameEditor>,
     pub(super) directory_properties: Option<DirectoryProperties>,
-    pub(super) tabs: Vec<BrowserTab>,
-    pub(super) active_tab: usize,
-    pub(super) navigation_revision: u64,
     pub(super) bookmarks: Entity<Bookmarks>,
     pub(super) bookmark_rename: Option<BookmarkRename>,
     pub(super) bookmark_properties: Option<BookmarkProperties>,
@@ -49,9 +54,6 @@ pub struct App {
     pub(super) tag_editor: Option<TagEditor>,
     pub(super) storage: Entity<StorageDevices>,
     pub(super) default_favorites: Vec<SidebarItem>,
-    pub(super) search: Entity<InputState>,
-    pub(super) browser: Browser,
-    pub(super) view_mode: ViewMode,
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
 
@@ -95,7 +97,7 @@ impl App {
     pub(super) fn open_window_at(
         cx: &mut gpui_kit::App,
         target: Option<(PathBuf, Entity<Bookmarks>)>,
-    ) -> anyhow::Result<WindowHandle<Self>> {
+    ) -> Result<WindowHandle<Self>> {
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
             window_bounds: Some(WindowBounds::centered(
@@ -118,7 +120,6 @@ impl App {
         cx: &mut Context<Self>,
     ) -> Self {
         let home = home_directory();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("搜索当前页"));
         let persist_session = target.is_none();
         if persist_session {
             let mut config = AppConfig::load_from_file().unwrap_or_else(|error| {
@@ -182,15 +183,16 @@ impl App {
 
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let view = &cx.global::<ActivePreferences>().0.view;
+        let pane = BrowserPane::new(tabs, active_tab, window, cx);
         let mut app = Self {
             focus,
             file_job: None,
             file_name_editor: None,
             directory_properties: None,
-            tabs,
-            active_tab,
-            navigation_revision: 0,
+            panes: vec![pane],
+            pane_target: 0,
+            active_pane: 0,
+            pane_layout: PaneLayout::default(),
             bookmarks,
             bookmark_rename: None,
             bookmark_properties: None,
@@ -202,16 +204,8 @@ impl App {
             tag_editor: None,
             storage: cx.global::<SharedStorage>().0.clone(),
             default_favorites: default_favorites(home),
-            search,
-            browser: Browser::new(view.show_hidden_files),
-            view_mode: view.view_mode,
             preferences: None,
         };
-        cx.observe(&app.search, |this, search, cx| {
-            let query = search.read(cx).value().trim().to_lowercase();
-            this.search_directory(query, cx);
-        })
-        .detach();
         cx.observe_global::<ActivePreferences>(|this, cx| {
             if !cx.global::<ActivePreferences>().0.view.remember_tab_state {
                 this.clear_saved_tab_states();
@@ -228,11 +222,26 @@ impl App {
                 .watch_bookmarks(&app.bookmarks, cx);
         }
         cx.subscribe_in(&app.tag_state, window, |this, _, event, window, cx| {
-            this.sync_tag_change(event, window, cx);
+            this.sync_tags_in_panes(event, window, cx);
         })
         .detach();
         cx.observe(&app.storage, |_, _, cx| cx.notify()).detach();
         app.load_directory(cx);
+        if persist_session
+            && matches!(
+                cx.global::<ActivePreferences>().0.general.startup_behavior,
+                StartupBehavior::RestoreLastDir
+            )
+        {
+            app.restore_split(
+                workspace
+                    .session
+                    .grid
+                    .or_else(|| workspace.session.split.map(Into::into)),
+                window,
+                cx,
+            );
+        }
         app
     }
 }
@@ -244,6 +253,7 @@ impl Render for App {
             || matches!(window.window_decorations(), Decorations::Client { tiling } if tiling.is_tiled());
         // 窗口最大化或全屏时，圆角为 0，避免与系统边框冲突
         let radius = if square { px(0.) } else { WINDOW_RADIUS };
+        // 窗口最大化或全屏时，边框为 0
         let border = if square { px(0.) } else { px(1.) };
         v_flex()
             .id("file-manager")
@@ -269,10 +279,36 @@ impl Render for App {
                     && this.directory_properties.is_none()
                     && this.tag_editor.is_none()
                 {
-                    this.close_tab(this.active_tab, window, cx);
+                    this.close_tab(this.panes[this.pane_target].active_tab, window, cx);
                 }
             }))
-            .on_drag_move::<TerminalResize>(cx.listener(Self::resize_embedded_terminal))
+            .on_action(cx.listener(|this, _: &SplitPane, window, cx| {
+                this.open_split(SplitLayout::SideBySide, true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+                this.open_split(SplitLayout::Stacked, true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitLeft, window, cx| {
+                this.open_split(SplitLayout::SideBySide, false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitUp, window, cx| {
+                this.open_split(SplitLayout::Stacked, false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaneLeft, window, cx| {
+                this.focus_split_pane(SplitLayout::SideBySide, false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaneRight, window, cx| {
+                this.focus_split_pane(SplitLayout::SideBySide, true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaneUp, window, cx| {
+                this.focus_split_pane(SplitLayout::Stacked, false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PaneDown, window, cx| {
+                this.focus_split_pane(SplitLayout::Stacked, true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePane, window, cx| {
+                this.close_split(window, cx);
+            }))
             .relative()
             .size_full()
             .rounded(radius)
@@ -287,17 +323,7 @@ impl Render for App {
                     .flex_1()
                     .min_h_0()
                     .child(self.sidebar(radius, cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h_0()
-                            .when(self.show_tab_bar(), |panel| {
-                                panel.child(self.tab_bar(window, cx))
-                            })
-                            .child(self.file_area(window, cx))
-                            .children(self.embedded_terminal_panel(window)),
-                    ),
+                    .child(self.browser_panes(border, window, cx)),
             )
             .when(
                 !square
