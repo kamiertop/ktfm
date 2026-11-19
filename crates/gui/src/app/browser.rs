@@ -469,7 +469,7 @@ impl App {
         let watch = match DirectoryWatch::new(path) {
             Ok(watch) => watch,
             Err(error) => {
-                eprintln!("无法监听目录 {}：{error}", path.display());
+                tracing::warn!(%error, "无法监听目录");
                 return;
             }
         };

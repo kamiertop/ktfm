@@ -42,7 +42,7 @@ impl DirectoryWatch {
             let refresh = match event {
                 Ok(event) => event.need_rescan() || relevant(&event),
                 Err(error) => {
-                    eprintln!("目录监听出错：{error}");
+                    tracing::warn!(%error, "目录监听出错");
                     true
                 }
             };

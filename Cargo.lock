@@ -2981,6 +2981,8 @@ dependencies = [
  "serde_json",
  "settings",
  "sys",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
  "vfs",
 ]
@@ -6443,6 +6445,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
+ "tracing",
  "turso",
  "uuid",
 ]
@@ -7869,6 +7872,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "notify",
+ "tracing",
 ]
 
 [[package]]

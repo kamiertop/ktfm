@@ -73,7 +73,7 @@ impl App {
         match IoQueue::new() {
             Ok(io) => cx.set_global(io),
             Err(error) => {
-                eprintln!("无法启动存储线程：{error}");
+                tracing::error!(%error, "无法启动存储线程");
                 cx.quit();
                 return;
             }
@@ -89,7 +89,7 @@ impl App {
         let tags = cx.new(|_| TagState::loading());
         cx.set_global(SharedTags(tags.clone()));
         if let Err(error) = Self::open_window_at(cx, None) {
-            eprintln!("无法打开窗口：{error:#}");
+            tracing::error!(error = %format_args!("{error:#}"), "无法打开窗口");
             cx.quit();
             return;
         }
@@ -126,12 +126,12 @@ impl App {
         let persist_session = target.is_none();
         if persist_session {
             let mut config = AppConfig::load_from_file().unwrap_or_else(|error| {
-                eprintln!("无法加载配置：{error}");
+                tracing::warn!(%error, "无法加载配置");
                 AppConfig::default()
             });
             if let Err(error) = keymap::bind_all(&config.shortcuts, cx) {
                 // 键位无效时退回默认配置，保证窗口按键始终可用。
-                eprintln!("无法加载快捷键：{error}");
+                tracing::warn!(%error, "无法加载快捷键");
                 config.shortcuts = Default::default();
                 let _ = keymap::bind_all(&config.shortcuts, cx);
             }

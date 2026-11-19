@@ -153,6 +153,7 @@ impl FileClipboard {
 #[derive(Default)]
 pub struct FileJobs {
     running: usize,
+    next_id: u64,
 }
 
 impl Global for FileJobs {}
@@ -447,7 +448,10 @@ impl App {
     fn run_file_job(&mut self, job: FileJob, window: &mut Window, cx: &mut Context<Self>) {
         let kind = job.kind();
         self.file_job = Some(kind);
-        cx.global_mut::<FileJobs>().running += 1;
+        let jobs = cx.global_mut::<FileJobs>();
+        jobs.running += 1;
+        let job_id = jobs.next_id;
+        jobs.next_id += 1;
         let clipboard_revision = cx.global::<FileClipboard>().revision;
         self.panes[self.pane_target].browser.action_error = None;
         if let Some(editor) = &mut self.file_name_editor {
@@ -456,7 +460,27 @@ impl App {
         let pane_id = self.panes[self.pane_target].id;
         let navigation_revision = self.panes[self.pane_target].navigation_revision;
         let named_job = matches!(kind, JobKind::Create | JobKind::Rename);
-        let work = cx.background_spawn(async move { job.run() });
+        let work = cx.background_spawn(async move {
+            tracing::debug!(job_id, ?kind, "开始文件任务");
+            let started = std::time::Instant::now();
+            let outcome = job.run();
+            let mut errors = outcome
+                .items
+                .iter()
+                .filter_map(|item| item.result.as_ref().err());
+            if let Some(error) = errors.next() {
+                let failures = 1 + errors.count();
+                tracing::warn!(job_id, ?kind, failures, %error, "文件任务存在失败项");
+            }
+            tracing::debug!(
+                job_id,
+                ?kind,
+                items = outcome.items.len(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                "结束文件任务"
+            );
+            outcome
+        });
         let app_context = cx.to_async();
         cx.spawn_in(window, async move |this, cx| {
             let outcome = work.await;

@@ -23,7 +23,7 @@ pub enum FileJob {
     Trash(Vec<PathBuf>),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobKind {
     Create,
     Rename,

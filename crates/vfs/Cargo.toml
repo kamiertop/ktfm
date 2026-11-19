@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 async-channel = "2.5"
 notify = "8.2"
+tracing.workspace = true

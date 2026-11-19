@@ -64,7 +64,7 @@ impl IoQueue {
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
-            eprintln!("存储线程异常退出");
+            tracing::error!("存储线程异常退出");
         }
     }
 }

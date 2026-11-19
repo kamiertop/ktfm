@@ -59,7 +59,7 @@ impl WorkspaceWriter {
         let watch = match watch {
             Ok(watch) => watch,
             Err(error) => {
-                eprintln!("无法监听书签更新：{error}");
+                tracing::warn!(%error, "无法监听书签更新");
                 return;
             }
         };
@@ -88,7 +88,7 @@ impl WorkspaceWriter {
                                 *bookmarks = workspace.bookmarks;
                                 cx.notify();
                             }
-                            Err(error) => eprintln!("无法同步书签：{error}"),
+                            Err(error) => tracing::warn!(%error, "无法同步书签"),
                             _ => {}
                         }
                         true
@@ -164,7 +164,7 @@ impl WorkspaceWriter {
                 .err()
                 .map(|error| format!("保存标签页会话失败：{error}"));
             if let Some(error) = &error {
-                eprintln!("{error}");
+                tracing::error!("{error}");
             }
             self.0
                 .queue
