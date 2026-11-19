@@ -335,12 +335,16 @@ impl App {
                     })
                     .collect(),
                 active: Some(pane.tabs[pane.active_tab].id),
+                view_mode: Some(pane.view_mode),
+                zoom_step: pane.zoom_step,
             };
             let mut panes = self.ordered_panes().map(snapshot);
             let first = panes.next().expect("主窗格存在");
             let session = Session {
                 tabs: first.tabs,
                 active: first.active,
+                view_mode: first.view_mode,
+                zoom_step: first.zoom_step,
                 split: None,
                 grid: (self.panes.len() > 1).then(|| GridSession {
                     columns: self.pane_layout.columns.clone(),

@@ -2,17 +2,21 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 use settings::config::tab::Location;
+use settings::config::view::ViewMode;
 use vfs::{Directory, DirectoryWatch, Entry, EntryKind, read_directory, read_references};
 
 use super::App;
+use crate::model::entry_appearance;
+
+const ESTIMATED_GRID_ROW_PADDING: Pixels = px(60.);
 
 pub(super) enum DirectoryState {
     Unavailable,
-    Loading,
+    Loading { show_message: bool },
     Ready(Arc<DirectorySnapshot>),
     Failed(String),
 }
@@ -45,6 +49,19 @@ struct ReadTask {
     _task: Task<()>,
 }
 
+pub(super) enum SelectedSize {
+    Loading,
+    Ready(u64),
+    Unavailable,
+}
+
+struct SizeRead {
+    path: PathBuf,
+    revision: u64,
+    size: SelectedSize,
+    task: Option<ReadTask>,
+}
+
 impl Drop for ReadTask {
     fn drop(&mut self) {
         self.cancelled.store(true, Relaxed);
@@ -63,6 +80,14 @@ struct ScrollAnchor {
     position: usize,
 }
 
+#[derive(PartialEq)]
+struct GridScrollLayout {
+    columns: usize,
+    tile_width: Pixels,
+    icon_size: Pixels,
+    revision: u64,
+}
+
 #[derive(Default)]
 struct Selection {
     paths: BTreeSet<PathBuf>,
@@ -79,6 +104,8 @@ pub(super) struct Browser {
     pub(super) reveal_row: Option<usize>,
     pub(super) scroll: UniformListScrollHandle,
     pub(super) scroll_layout: Option<(usize, Pixels)>,
+    pub(super) grid_scroll: ListState,
+    grid_layout: Option<GridScrollLayout>,
     pub(super) restore_row: Option<usize>,
     pub(super) tab_restore: Option<TabBrowseState>,
     pub(super) action_error: Option<String>,
@@ -88,6 +115,7 @@ pub(super) struct Browser {
     directory_watch: Option<Task<()>>,
     refresh_pending: bool,
     filter_task: Option<ReadTask>,
+    size_read: Option<SizeRead>,
 }
 
 impl Browser {
@@ -106,8 +134,21 @@ impl Browser {
         self.selection.paths.len()
     }
 
+    pub(super) fn selected_size(&self) -> Option<&SelectedSize> {
+        self.size_read.as_ref().map(|read| &read.size)
+    }
+
     pub(super) fn is_selected(&self, path: &Path) -> bool {
         self.selection.paths.contains(path)
+    }
+
+    pub(super) fn single_selected_entry(&self) -> Option<&Entry> {
+        if self.selection_len() != 1 {
+            return None;
+        }
+        let snapshot = self.snapshot()?;
+        let path = self.selection.paths.first()?;
+        snapshot.directory.entries.get(*snapshot.indices.get(path)?)
     }
 
     pub(super) fn selected_entries(&self) -> impl Iterator<Item = &Entry> {
@@ -227,6 +268,9 @@ impl Browser {
 
     fn scroll_anchor(&self) -> Option<ScrollAnchor> {
         let position = self.restore_row.unwrap_or_else(|| {
+            if let Some(layout) = &self.grid_layout {
+                return self.grid_scroll.logical_scroll_top().item_ix * layout.columns;
+            }
             self.scroll_layout.map_or(0, |(columns, row_height)| {
                 let offset = self.scroll.0.borrow().base_handle.offset();
                 ((-offset.y / row_height).max(0.) as usize) * columns
@@ -246,6 +290,56 @@ impl Browser {
         });
     }
 
+    pub(super) fn preserve_scroll_anchor(&mut self) {
+        if let Some(anchor) = self.scroll_anchor() {
+            self.restore_scroll(&anchor);
+        }
+    }
+
+    pub(super) fn prepare_grid_scroll(
+        &mut self,
+        columns: usize,
+        tile_width: Pixels,
+        icon_size: Pixels,
+    ) {
+        let layout = GridScrollLayout {
+            columns,
+            tile_width,
+            icon_size,
+            revision: self.snapshot_revision,
+        };
+        let rows = self.visible.len().div_ceil(columns);
+        if self.grid_layout.as_ref() != Some(&layout) || self.grid_scroll.item_count() != rows {
+            if let Some(previous) = &self.grid_layout
+                && previous.columns == columns
+                && previous.revision == layout.revision
+                && self.grid_scroll.item_count() == rows
+            {
+                self.grid_scroll.remeasure();
+            } else {
+                let previous_top = self.grid_layout.as_ref().map(|previous| {
+                    let top = self.grid_scroll.logical_scroll_top();
+                    ListOffset {
+                        item_ix: top.item_ix * previous.columns / columns,
+                        offset_in_item: top.offset_in_item,
+                    }
+                });
+                // 列数改变后沿用原首行的文件定位，并保留行内滚动偏移。
+                self.grid_scroll
+                    .reset_with_uniform_height(rows, icon_size + ESTIMATED_GRID_ROW_PADDING);
+                if let Some(top) = previous_top {
+                    self.grid_scroll.scroll_to(top);
+                }
+            }
+            self.grid_layout = Some(layout);
+        }
+    }
+
+    pub(super) fn reset_grid_scroll(&mut self) {
+        self.grid_scroll.reset(0);
+        self.grid_layout = None;
+    }
+
     pub(super) fn new(show_hidden: bool) -> Self {
         Self {
             state: DirectoryState::Unavailable,
@@ -257,6 +351,8 @@ impl Browser {
             reveal_row: None,
             scroll: UniformListScrollHandle::new(),
             scroll_layout: None,
+            grid_scroll: ListState::new(0, ListAlignment::Top, px(400.)),
+            grid_layout: None,
             restore_row: None,
             tab_restore: None,
             action_error: None,
@@ -266,11 +362,67 @@ impl Browser {
             directory_watch: None,
             refresh_pending: false,
             filter_task: None,
+            size_read: None,
         }
     }
 }
 
 impl App {
+    pub(super) fn refresh_selected_size(&mut self, cx: &mut Context<Self>) {
+        let pane = &mut self.panes[self.pane_target];
+        let browser = &mut pane.browser;
+        let Some(entry) = browser.single_selected_entry() else {
+            browser.size_read = None;
+            return;
+        };
+        let revision = browser.snapshot_revision;
+        if browser
+            .size_read
+            .as_ref()
+            .is_some_and(|read| read.revision == revision && read.path == entry.path)
+        {
+            return;
+        }
+
+        let path = entry.path.clone();
+        let pane_id = pane.id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read_cancelled = cancelled.clone();
+        let request = cancelled.clone();
+        let work_path = path.clone();
+        let work = cx.background_spawn(async move {
+            vfs::entry_size(&work_path, || read_cancelled.load(Relaxed))
+        });
+        let task = cx.spawn(async move |app, cx| {
+            let size = match work.await {
+                Ok(bytes) => SelectedSize::Ready(bytes),
+                Err(_) => SelectedSize::Unavailable,
+            };
+            let _ = app.update(cx, |app, cx| {
+                if let Some(pane) = app.panes.iter_mut().find(|pane| pane.id == pane_id)
+                    && let Some(read) = &mut pane.browser.size_read
+                    && read
+                        .task
+                        .as_ref()
+                        .is_some_and(|task| Arc::ptr_eq(&task.cancelled, &request))
+                {
+                    read.size = size;
+                    read.task = None;
+                    cx.notify();
+                }
+            });
+        });
+        browser.size_read = Some(SizeRead {
+            path,
+            revision,
+            size: SelectedSize::Loading,
+            task: Some(ReadTask {
+                cancelled,
+                _task: task,
+            }),
+        });
+    }
+
     pub(super) fn load_directory(&mut self, cx: &mut Context<Self>) {
         let source = self.read_source(cx);
         let tag_pending = matches!(source, Some(ReadSource::MissingTag))
@@ -278,7 +430,7 @@ impl App {
             .filter(|state| state.loaded_tags().is_none())
             .map(|state| match state.load_error() {
                 Some(error) => DirectoryState::Failed(error.to_owned()),
-                None => DirectoryState::Loading,
+                None => DirectoryState::Loading { show_message: true },
             });
         let browser = &mut self.panes[self.pane_target].browser;
         browser.snapshot_revision += 1;
@@ -291,6 +443,7 @@ impl App {
         browser.clear_selection();
         browser.action_error = None;
         browser.scroll = UniformListScrollHandle::new();
+        browser.reset_grid_scroll();
         browser.restore_row = None;
         let Some(source) = source else {
             browser.state = DirectoryState::Unavailable;
@@ -303,7 +456,9 @@ impl App {
             cx.notify();
             return;
         }
-        browser.state = DirectoryState::Loading;
+        browser.state = DirectoryState::Loading {
+            show_message: false,
+        };
         if let ReadSource::Directory(path) = &source {
             self.watch_directory(path, cx);
         }
@@ -384,8 +539,25 @@ impl App {
 
     fn read_snapshot(&mut self, source: ReadSource, cx: &mut Context<Self>) {
         let pane_id = self.panes[self.pane_target].id;
+        let cache_reader = (self.panes[self.pane_target].view_mode == ViewMode::Grid)
+            .then(|| self.thumbnails.cache_reader(cx.svg_renderer()))
+            .flatten();
         let browser = &mut self.panes[self.pane_target].browser;
         let snapshot_revision = browser.snapshot_revision;
+        let show_loading_later = matches!(
+            browser.state,
+            DirectoryState::Loading {
+                show_message: false
+            }
+        );
+        let anchor_path = cache_reader.as_ref().and_then(|_| {
+            browser
+                .tab_restore
+                .as_ref()
+                .and_then(|saved| saved.scroll.as_ref())
+                .map(|anchor| anchor.path.clone())
+                .or_else(|| browser.scroll_anchor().map(|anchor| anchor.path))
+        });
         let cancelled = Arc::new(AtomicBool::new(false));
         let read_cancelled = cancelled.clone();
         let query = browser.query.clone();
@@ -398,7 +570,28 @@ impl App {
                 ReadSource::MissingTag => return Err(std::io::Error::other("标签已删除")),
             };
             let visible = filtered_entries(&directory, &query, show_hidden, &read_cancelled);
-            Ok::<_, std::io::Error>((DirectorySnapshot::new(directory), visible, query))
+            let directory = DirectorySnapshot::new(directory);
+            let mut thumbnails = Vec::new();
+            if let Some(read_cache) = cache_reader {
+                let start = anchor_path
+                    .as_ref()
+                    .and_then(|path| directory.indices.get(path))
+                    .and_then(|index| visible.binary_search(index).ok())
+                    .map_or(0, |position| position.saturating_sub(8));
+                let deadline = Instant::now() + Duration::from_millis(35);
+                for &index in visible.iter().skip(start).take(48) {
+                    if is_cancelled() || Instant::now() >= deadline {
+                        break;
+                    }
+                    let entry = &directory.directory.entries[index];
+                    if entry_appearance(entry.kind, &entry.path).2
+                        && let Some(image) = read_cache(&entry.path, 160)
+                    {
+                        thumbnails.push((index, image));
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>((directory, visible, query, thumbnails))
         });
         let task = cx.spawn(async move |this, cx| {
             let result = read.await;
@@ -411,12 +604,21 @@ impl App {
                     let mut refresh_pending =
                         std::mem::take(&mut this.panes[this.pane_target].browser.refresh_pending);
                     match result {
-                        Ok((directory, visible, query)) => {
+                        Ok((directory, visible, query, thumbnails)) => {
                             let filter_matches = query
                                 == this.panes[this.pane_target].browser.query
                                 && show_hidden == this.panes[this.pane_target].browser.show_hidden;
                             if filter_matches {
                                 this.replace_snapshot(directory, visible);
+                                let revision =
+                                    this.panes[this.pane_target].browser.snapshot_revision;
+                                for (index, image) in thumbnails {
+                                    this.thumbnails.seed_cached(
+                                        (pane_id, revision, index),
+                                        image,
+                                        cx,
+                                    );
+                                }
                             } else if matches!(
                                 this.panes[this.pane_target].browser.state,
                                 DirectoryState::Ready(_)
@@ -450,6 +652,24 @@ impl App {
             cancelled,
             _task: task,
         });
+        if show_loading_later {
+            let timer = cx.background_executor().timer(Duration::from_millis(120));
+            cx.spawn(async move |app, cx| {
+                timer.await;
+                let _ = app.update(cx, |app, cx| {
+                    app.with_pane(pane_id, |app| {
+                        let browser = &mut app.panes[app.pane_target].browser;
+                        if browser.snapshot_revision == snapshot_revision
+                            && let DirectoryState::Loading { show_message } = &mut browser.state
+                        {
+                            *show_message = true;
+                            cx.notify();
+                        }
+                    });
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -552,6 +772,7 @@ impl App {
                         this.panes[this.pane_target].browser.filtering = false;
                         this.panes[this.pane_target].browser.scroll =
                             UniformListScrollHandle::new();
+                        this.panes[this.pane_target].browser.reset_grid_scroll();
                         this.panes[this.pane_target].browser.restore_row = None;
                         this.restore_snapshot_position();
                         cx.notify();
@@ -711,6 +932,25 @@ mod tests {
             .selected_entries()
             .map(|entry| entry.name.to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn grid_reflow_keeps_the_top_visible_entry_as_scroll_anchor() {
+        use gpui_kit::{ListOffset, px};
+
+        let mut browser = browser_with_entries();
+        browser.prepare_grid_scroll(2, px(112.), px(64.));
+        browser.grid_scroll.scroll_to(ListOffset {
+            item_ix: 1,
+            offset_in_item: px(11.),
+        });
+        assert_eq!(browser.scroll_anchor().unwrap().position, 2);
+
+        browser.prepare_grid_scroll(1, px(144.), px(96.));
+        assert_eq!(browser.grid_scroll.item_count(), 4);
+        let top = browser.grid_scroll.logical_scroll_top();
+        assert_eq!(top.item_ix, 2);
+        assert_eq!(top.offset_in_item, px(11.));
     }
 
     #[test]

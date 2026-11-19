@@ -143,12 +143,9 @@ impl PaneLayout {
                 {
                     return Some(start + next);
                 }
-                let Some(next) = column
+                let next = column
                     .checked_add_signed(offset)
-                    .filter(|&next| next < self.columns.len())
-                else {
-                    return None;
-                };
+                    .filter(|&next| next < self.columns.len())?;
                 let target = &self.columns[next];
                 let next_start: usize = self.columns[..next]
                     .iter()

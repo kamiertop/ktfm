@@ -22,6 +22,27 @@ const DIVIDER: Pixels = px(6.);
 const MAX_COLUMNS: usize = 3;
 const MAX_PANES: usize = 6;
 
+const GRID_ZOOM_SIZES: [Pixels; 5] = [px(48.), px(64.), px(96.), px(168.), px(256.)];
+const LIST_ZOOM_SIZES: [Pixels; 3] = [px(16.), px(32.), px(64.)];
+
+fn zoom_sizes(mode: ViewMode) -> &'static [Pixels] {
+    match mode {
+        ViewMode::Grid => &GRID_ZOOM_SIZES,
+        ViewMode::List => &LIST_ZOOM_SIZES,
+    }
+}
+
+pub(super) fn clamp_zoom_step(mode: ViewMode, step: i8) -> i8 {
+    let midpoint = (zoom_sizes(mode).len() / 2) as i8;
+    step.clamp(-midpoint, midpoint)
+}
+
+pub(super) fn zoom_icon_size(mode: ViewMode, step: i8) -> Pixels {
+    let sizes = zoom_sizes(mode);
+    let index = sizes.len() as i8 / 2 + clamp_zoom_step(mode, step);
+    sizes[index as usize]
+}
+
 mod layout;
 pub(super) use layout::PaneLayout;
 const MIN_COLUMN_WIDTH: Pixels = px(200.);
@@ -35,9 +56,18 @@ pub(super) struct BrowserPane {
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
     pub(super) view_mode: ViewMode,
+    pub(super) zoom_step: i8,
+    pub(super) zoom_scroll: Option<(std::time::Instant, f32)>,
 }
 
 impl BrowserPane {
+    pub(super) fn restore_view(&mut self, mode: Option<ViewMode>, zoom_step: i8) {
+        if let Some(mode) = mode {
+            self.view_mode = mode;
+        }
+        self.zoom_step = clamp_zoom_step(self.view_mode, zoom_step);
+    }
+
     pub(super) fn new(
         tabs: Vec<BrowserTab>,
         active_tab: usize,
@@ -61,6 +91,8 @@ impl BrowserPane {
             search,
             browser: Browser::new(show_hidden),
             view_mode,
+            zoom_step: 0,
+            zoom_scroll: None,
         }
     }
 }
@@ -113,7 +145,7 @@ impl App {
         self.pane_target = index;
     }
 
-    fn pane_changes_allowed(&self) -> bool {
+    pub(super) fn pane_changes_allowed(&self) -> bool {
         self.file_name_editor.is_none()
             && self.directory_properties.is_none()
             && self.tag_editor.is_none()
@@ -183,8 +215,9 @@ impl App {
                 self.tag_state.read(cx).loaded_tags(),
                 self.home().map(ToOwned::to_owned),
             );
-            self.panes
-                .push(BrowserPane::new(tabs, selected, window, cx));
+            let mut restored = BrowserPane::new(tabs, selected, window, cx);
+            restored.restore_view(pane.view_mode, pane.zoom_step);
+            self.panes.push(restored);
         }
         let inactive: Vec<_> = self
             .panes
@@ -334,7 +367,7 @@ impl App {
     pub(super) fn browser_panes(
         &mut self,
         border_width: Pixels,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let viewport = window.viewport_size();
@@ -342,7 +375,7 @@ impl App {
         let height = (viewport.height - TITLE_BAR_HEIGHT - border_width * 2.).max(px(0.));
         if self.panes.len() == 1 {
             return self
-                .browser_pane(size(width, height), false, true, cx)
+                .browser_pane(size(width, height), false, true, window, cx)
                 .into_any_element();
         }
 
@@ -483,7 +516,13 @@ impl App {
                     }
                     let pane = self
                         .with_pane(id, |app| {
-                            app.browser_pane(size(widths[position], height), true, id == active, cx)
+                            app.browser_pane(
+                                size(widths[position], height),
+                                true,
+                                id == active,
+                                window,
+                                cx,
+                            )
                         })
                         .expect("窗格存在");
                     line = line.child(pane);
@@ -501,6 +540,7 @@ impl App {
         size: Size<Pixels>,
         split: bool,
         active: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let id = self.panes[self.pane_target].id;
@@ -537,7 +577,7 @@ impl App {
             .when(split || self.show_tab_bar(), |pane| {
                 pane.child(self.tab_bar(size.width, cx))
             })
-            .child(self.file_area(size.width, cx))
+            .child(self.file_area(size.width, window, cx))
             .children(self.embedded_terminal_panel(size.height))
     }
 }

@@ -20,8 +20,11 @@ actions!(
     [
         NewTab,
         CloseTab,
+        CancelCut,
         OpenTerminal,
         OpenPreferences,
+        ZoomIn,
+        ZoomOut,
         SplitPane,
         SplitDown,
         SplitLeft,
@@ -35,6 +38,17 @@ actions!(
 );
 // 内嵌终端聚焦时由终端视图处理的剪贴板动作。
 actions!(browser, [TerminalCopy, TerminalPaste]);
+
+const CANCEL_CUT_KEY: &str = "escape";
+const CANCEL_CUT_LABEL: &str = "取消剪切";
+
+pub(super) fn bind_cancel_cut(cx: &mut gpui_kit::App) {
+    cx.bind_keys([KeyBinding::new(
+        CANCEL_CUT_KEY,
+        CancelCut,
+        Some("PendingFileCut && !EmbeddedTerminal"),
+    )]);
+}
 
 /// 快捷键的生效范围，决定绑定的按键上下文与冲突判定。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,6 +124,8 @@ shortcut_entries! {
     (ClosePane, close_pane, "关闭分栏", ShortcutScope::FileArea),
     (OpenTerminal, open_terminal, "打开终端", ShortcutScope::Everywhere),
     (OpenPreferences, open_preferences, "偏好设置", ShortcutScope::FileArea),
+    (ZoomIn, zoom_in, "放大文件视图", ShortcutScope::FileArea),
+    (ZoomOut, zoom_out, "缩小文件视图", ShortcutScope::FileArea),
     (FileAction::SelectAll, select_all, "全选", ShortcutScope::FileArea),
     (FileAction::Copy, copy, "复制", ShortcutScope::FileArea),
     (FileAction::Cut, cut, "剪切", ShortcutScope::FileArea),
@@ -125,7 +141,11 @@ shortcut_entries! {
 
 /// 校验整份快捷键配置：逐条解析非空按键，并检查生效范围相交的重复。
 pub(super) fn validate(shortcuts: &ShortcutConfig) -> Result<(), String> {
-    let mut parsed: Vec<(ShortcutScope, Keystroke, &str)> = Vec::new();
+    let mut parsed = vec![(
+        ShortcutScope::FileArea,
+        parse_shortcut(CANCEL_CUT_KEY, CANCEL_CUT_LABEL)?,
+        CANCEL_CUT_LABEL,
+    )];
     for entry in SHORTCUTS {
         let value = (entry.get)(shortcuts);
         if value.trim().is_empty() {
@@ -199,6 +219,7 @@ pub(super) fn shortcut_os() -> OperatingSystem {
 /// 解析单个快捷键。拒绝多键序列与裸字符键（会干扰文本输入），
 /// 允许无修饰的功能键（F2、Delete 等）。空串由调用方过滤。
 pub(super) fn parse_shortcut(value: &str, label: &str) -> Result<Keystroke, String> {
+    let value = value.trim();
     let key = Keystroke::parse_with_os(value, shortcut_os())
         .map_err(|error| format!("{label}的快捷键无效：{error}"))?;
     let modifier = key.modifiers.control || key.modifiers.alt || key.modifiers.platform;
@@ -239,7 +260,33 @@ mod tests {
         // 同范围重复必然冲突。
         let mut config = ShortcutConfig::default();
         config.trash = config.rename.clone();
-        assert!(validate(&config).is_err());
+        assert_eq!(
+            validate(&config).unwrap_err(),
+            "“重命名”和“移到回收站”不能使用相同的快捷键"
+        );
+
+        let mut config = ShortcutConfig {
+            terminal_copy: "escape".into(),
+            ..ShortcutConfig::default()
+        };
+        assert!(validate(&config).is_ok());
+        config.trash = "escape".into();
+        assert_eq!(
+            validate(&config).unwrap_err(),
+            "“取消剪切”和“移到回收站”不能使用相同的快捷键"
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_hide_conflicts() {
+        let config = ShortcutConfig {
+            trash: "  ctrl-c  ".into(),
+            ..ShortcutConfig::default()
+        };
+        assert_eq!(
+            validate(&config).unwrap_err(),
+            "“复制”和“移到回收站”不能使用相同的快捷键"
+        );
     }
 
     #[test]

@@ -80,6 +80,18 @@ pub(super) struct FileClipboard {
 impl Global for FileClipboard {}
 
 impl FileClipboard {
+    pub(super) fn can_cancel_cut(&self) -> bool {
+        !self.pasting && !self.pending_cut_paths().is_empty()
+    }
+
+    pub(super) fn cancel_cut(&mut self) {
+        if self.can_cancel_cut() {
+            self.paths = Arc::default();
+            self.cut = false;
+            self.revision += 1;
+        }
+    }
+
     pub(super) fn pending_cut_paths(&self) -> &[PathBuf] {
         if self.cut { &self.paths } else { &[] }
     }
@@ -706,6 +718,28 @@ impl App {
 mod tests {
     use super::{FileClipboard, JobKind, JobResult, PathBuf};
     use daemon::job::ItemResult;
+
+    #[test]
+    fn cancel_cut_clears_only_pending_cut_paths() {
+        let paths: std::sync::Arc<[PathBuf]> = [PathBuf::from("/source")].into();
+        let mut state = FileClipboard {
+            paths: paths.clone(),
+            ..Default::default()
+        };
+        state.cancel_cut();
+        assert_eq!(state.paths, paths);
+
+        state.cut = true;
+        state.pasting = true;
+        state.cancel_cut();
+        assert_eq!(state.paths, paths);
+
+        state.pasting = false;
+        state.cancel_cut();
+        assert!(state.paths.is_empty());
+        assert!(!state.cut);
+        assert_eq!(state.revision, 1);
+    }
 
     #[test]
     fn pending_cut_follows_successful_renames_and_removes_trashed_paths() {

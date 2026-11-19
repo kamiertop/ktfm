@@ -16,6 +16,13 @@ const ANSI: [u32; 16] = [
     0xff989d, 0xa7e6b3, 0xffda95, 0x9ec0ff, 0xddb4ff, 0xa0e7eb, 0xf2f4f8,
 ];
 
+struct BackgroundRun {
+    row: i32,
+    start: usize,
+    end: usize,
+    color: Hsla,
+}
+
 pub(super) fn terminal_font(cx: &App) -> Font {
     static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
     let fallback = &cx.theme().mono_font_family;
@@ -102,6 +109,7 @@ impl Metrics {
         let base_foreground = terminal_color(Color::Named(NamedColor::Foreground));
 
         let mut cells = Vec::new();
+        let mut backgrounds: Vec<BackgroundRun> = Vec::new();
         for indexed in content.display_iter {
             let cell = indexed.cell;
             let location = indexed.point;
@@ -127,6 +135,25 @@ impl Metrics {
                 background = cursor_color;
                 foreground = base_background;
             }
+            let column = location.column.0;
+            let row = location.line.0 + content.display_offset as i32;
+            if background != base_background {
+                // 同色相邻格共用一个矩形，避免逐格对齐设备像素时露出底色。
+                if let Some(run) = backgrounds.last_mut()
+                    && run.row == row
+                    && run.end == column
+                    && run.color == background
+                {
+                    run.end += 1;
+                } else {
+                    backgrounds.push(BackgroundRun {
+                        row,
+                        start: column,
+                        end: column + 1,
+                        color: background,
+                    });
+                }
+            }
             let mut text = String::new();
             let spacer =
                 flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
@@ -138,12 +165,8 @@ impl Metrics {
                     text.extend(extra);
                 }
             }
-            if !text.is_empty() || background != base_background {
-                let origin = self.origin(
-                    location.column.0,
-                    location.line.0 + content.display_offset as i32,
-                );
-                cells.push((origin, background, foreground, text, flags));
+            if !text.is_empty() {
+                cells.push((self.origin(column, row), foreground, text, flags));
             }
         }
         let show_cursor = running && content.display_offset == 0;
@@ -152,15 +175,14 @@ impl Metrics {
         if base_background != rgb(self.background).into() {
             window.paint_quad(fill(self.bounds, base_background));
         }
-        for (origin, background, _, _, _) in &cells {
-            if *background != base_background {
-                window.paint_quad(fill(Bounds::new(*origin, self.cell), *background));
-            }
+        for run in backgrounds {
+            let bounds = Bounds::from_corners(
+                self.origin(run.start, run.row),
+                self.origin(run.end, run.row + 1),
+            );
+            window.paint_quad(fill(bounds, run.color));
         }
-        for (origin, _, foreground, text, flags) in cells {
-            if text.is_empty() {
-                continue;
-            }
+        for (origin, foreground, text, flags) in cells {
             if let Some(path) = powerline_path(&text, Bounds::new(origin, self.cell)) {
                 window.paint_path(path, foreground);
                 continue;

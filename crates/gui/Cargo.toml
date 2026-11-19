@@ -14,5 +14,6 @@ settings = { path = "../settings" }
 sys = { path = "../sys" }
 vfs = { path = "../vfs" }
 hex_color.workspace = true
+rust-embed = { version = "8.13", features = ["debug-embed"] }
 serde_json = "1"
 uuid.workspace = true

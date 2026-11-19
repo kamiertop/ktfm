@@ -249,8 +249,9 @@ impl App {
 
 fn install_preferences(config: AppConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
     if config.shortcuts != cx.global::<ActivePreferences>().0.shortcuts {
+        validate(&config.shortcuts)?;
         // 先解绑旧键再绑新键，避免同一动作同时挂着两个键。
-        // 保存流程已整体校验过，这里失败只可能是环境异常。
+        // 校验通过后再改动当前窗口的键位。
         let old = cx.global::<ActivePreferences>().0.shortcuts.clone();
         unbind_all(&old, cx);
         bind_all(&config.shortcuts, cx)?;
@@ -308,13 +309,9 @@ impl Preferences {
                 {
                     return Err(settings::Error::InvalidExternalTerminal(program.clone()));
                 }
-                let check_shortcuts = draft.shortcuts != baseline.shortcuts;
                 AppConfig::update_file(|config| {
                     draft.merge_into(baseline, config);
-                    if check_shortcuts {
-                        validate(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)?;
-                    }
-                    Ok(())
+                    validate(&config.shortcuts).map_err(settings::Error::InvalidShortcuts)
                 })
             },
             move |result, cx| {
@@ -389,12 +386,14 @@ impl Preferences {
             return;
         } else {
             let value = key.unparse(shortcut_os());
-            if let Err(error) = parse_shortcut(&value, entry.label) {
+            let mut shortcuts = self.draft.shortcuts.clone();
+            *(entry.get_mut)(&mut shortcuts) = value;
+            if let Err(error) = validate(&shortcuts) {
                 self.error = Some(error);
                 cx.notify();
                 return;
             }
-            *((entry.get_mut)(&mut self.draft.shortcuts)) = value;
+            self.draft.shortcuts = shortcuts;
             self.recording = None;
             window.focus(&self.focus, cx);
             self.save(window, cx);

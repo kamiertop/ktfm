@@ -6,8 +6,8 @@ use gpui_kit::{App, Hsla, Pixels, px, rgb};
 
 pub const APP_ID: &str = "io.github.kamiertop.ktfm";
 
-pub const WINDOW_WIDTH: Pixels = px(1100.);
-pub const WINDOW_HEIGHT: Pixels = px(700.);
+pub const WINDOW_WIDTH: Pixels = px(1200.);
+pub const WINDOW_HEIGHT: Pixels = px(900.);
 pub const MIN_WINDOW_WIDTH: Pixels = px(640.);
 pub const MIN_WINDOW_HEIGHT: Pixels = px(400.);
 pub const TITLE_BAR_HEIGHT: Pixels = px(48.);
@@ -17,10 +17,6 @@ pub const SIDEBAR_WIDTH: Pixels = px(160.);
 pub const SIDEBAR_ICON_SIZE: Pixels = px(18.);
 const SIDEBAR_DIVIDER_LIGHT: u32 = 0x43816d;
 const SIDEBAR_DIVIDER_DARK: u32 = 0x66b59b;
-pub const FILE_ICON_SIZE: Pixels = px(20.);
-pub const GRID_ICON_SIZE: Pixels = px(34.);
-pub const GRID_TILE_WIDTH: Pixels = px(138.);
-pub const GRID_TILE_HEIGHT: Pixels = px(102.);
 
 pub const WINDOW_RADIUS: Pixels = px(18.);
 pub const WINDOW_RESIZE_EDGE: Pixels = px(5.);
@@ -106,6 +102,10 @@ pub fn icon_color(icon: IconName, mode: ThemeMode) -> Hsla {
         IconName::Images | IconName::Image | IconName::Download => (0x127463, 0x69d6be),
         IconName::Music | IconName::FileMusic | IconName::Tag => (0x7850aa, 0xc7a0f2),
         IconName::Film | IconName::Trash => (0xab455c, 0xf29bad),
+        IconName::FileType => (0xb73541, 0xff8e98),
+        IconName::Presentation => (0xad4b1e, 0xffab78),
+        IconName::FileSpreadsheet => (0x207247, 0x7cdb9c),
+        IconName::Table2 => (0x147984, 0x79d9e1),
         _ => (0x3667a3, 0x8cbcf5),
     };
     rgb(if mode.is_dark() { dark } else { light }).into()

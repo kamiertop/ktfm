@@ -6,8 +6,10 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::tab::Location;
 
+use super::file_icon::file_icon;
 use crate::app::App;
 use crate::components::truncated_text;
+use crate::model::entry_appearance;
 use crate::style::icon_color;
 
 impl App {
@@ -32,7 +34,11 @@ impl App {
         )
     }
 
-    pub(super) fn path_breadcrumb(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn path_breadcrumb(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let current = self.location();
         let mut path: Vec<_> = current
             .into_iter()
@@ -42,73 +48,97 @@ impl App {
                 (Some(ancestor.to_path_buf()), name, icon)
             })
             .collect();
+        path.reverse();
         if let Some(Location::Tag { .. }) = self.current_location() {
             let (name, icon) = self.location_appearance(self.current_location(), cx);
             path.push((None, name, icon));
         }
+        let browser = &self.pane().browser;
+        let selected = browser.single_selected_entry();
+        let copy_path = selected
+            .map(|entry| entry.path.as_path())
+            .or(current)
+            .map(Path::to_owned);
+        if let Some(entry) = selected {
+            let (icon, _, _) = entry_appearance(entry.kind, &entry.path);
+            path.push((None, entry.name.to_string_lossy().into_owned(), icon));
+        }
+        let selected_index = selected.map(|_| path.len() - 1);
         let theme = cx.theme();
         let mode = theme.mode;
         let hover_foreground = rgb(if mode.is_dark() { 0x121923 } else { 0xffffff });
         let muted = theme.muted_foreground;
         let border = theme.border;
 
-        let segments =
-            path.into_iter()
-                .rev()
-                .enumerate()
-                .map(|(index, (destination, name, icon))| {
-                    let active = destination.as_deref() == current;
-                    let is_root = destination
-                        .as_deref()
-                        .is_some_and(|path| path.has_root() && path.parent().is_none());
-                    let color = icon_color(icon, mode);
-                    let name: SharedString = name.into();
-                    let segment = h_flex()
-                        .id(("path-segment", index))
-                        .min_w_0()
-                        .when(is_root, |segment| segment.flex_shrink_0())
-                        .h_7()
-                        .gap_1()
-                        .px_2()
-                        .rounded_md()
-                        .bg(color.opacity(if active { 0.24 } else { 0.12 }))
-                        .text_color(color)
-                        .text_sm()
-                        .when(active, |segment| segment.font_semibold())
-                        .when_some(destination.filter(|_| !active), |segment, destination| {
-                            segment
-                                .role(Role::Link)
-                                .cursor_pointer()
-                                .hover(move |style| style.bg(color).text_color(hover_foreground))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.navigate(destination.clone(), window, cx);
-                                }))
-                        })
-                        .child(Icon::new(icon).size(px(15.)).flex_shrink_0())
-                        .when(is_root, |segment| segment.child(name.clone()))
-                        .when(!is_root, |segment| {
-                            segment.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(truncated_text(name.clone(), name)),
-                            )
-                        });
+        let segments = path
+            .into_iter()
+            .enumerate()
+            .map(|(index, (destination, name, icon))| {
+                let active = selected_index.map_or_else(
+                    || destination.as_deref() == current,
+                    |selected| index == selected,
+                );
+                let is_root = destination
+                    .as_deref()
+                    .is_some_and(|path| path.has_root() && path.parent().is_none());
+                let color = icon_color(icon, mode);
+                let name: SharedString = name.into();
+                let icon = if selected_index == Some(index)
+                    && let Some(entry) = selected
+                {
+                    file_icon(entry.kind, &entry.path, icon, px(15.), window, cx)
+                } else {
+                    Icon::new(icon)
+                        .size(px(15.))
+                        .flex_shrink_0()
+                        .into_any_element()
+                };
+                let segment = h_flex()
+                    .id(("path-segment", index))
+                    .min_w_0()
+                    .when(is_root, |segment| segment.flex_shrink_0())
+                    .h_7()
+                    .gap_1()
+                    .px_2()
+                    .rounded_md()
+                    .bg(color.opacity(if active { 0.24 } else { 0.12 }))
+                    .text_color(color)
+                    .text_sm()
+                    .when(active, |segment| segment.font_semibold())
+                    .when_some(destination.filter(|_| !active), |segment, destination| {
+                        segment
+                            .role(Role::Link)
+                            .cursor_pointer()
+                            .hover(move |style| style.bg(color).text_color(hover_foreground))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.navigate(destination.clone(), window, cx);
+                            }))
+                    })
+                    .child(icon)
+                    .when(is_root, |segment| segment.child(name.clone()))
+                    .when(!is_root, |segment| {
+                        segment.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(truncated_text(name.clone(), name)),
+                        )
+                    });
 
-                    h_flex()
-                        .min_w_0()
-                        .when(is_root, |item| item.flex_shrink_0())
-                        .gap_0p5() // 右侧间距
-                        .when(index > 0, |item| {
-                            item.child(
-                                Icon::new(IconName::ChevronRight)
-                                    .size(px(14.))
-                                    .flex_shrink_0()
-                                    .text_color(muted),
-                            )
-                        })
-                        .child(segment)
-                });
+                h_flex()
+                    .min_w_0()
+                    .when(is_root, |item| item.flex_shrink_0())
+                    .gap_0p5() // 右侧间距
+                    .when(index > 0, |item| {
+                        item.child(
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(14.))
+                                .flex_shrink_0()
+                                .text_color(muted),
+                        )
+                    })
+                    .child(segment)
+            });
 
         h_flex()
             .w_full()
@@ -128,7 +158,7 @@ impl App {
                     .gap_0p5() // IconName::ChevronRight 的左侧间距
                     .children(segments),
             )
-            .child(self.copy_path_button(cx))
+            .child(self.copy_path_button(copy_path, cx))
             .child(self.hidden_files_button(cx))
             .child(self.view_switch_button(cx))
     }

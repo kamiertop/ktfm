@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::workspace::SavedPath;
+use super::{view::ViewMode, workspace::SavedPath};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -31,6 +31,9 @@ pub struct TabItem {
 pub struct Session {
     pub tabs: Vec<TabItem>,
     pub active: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<ViewMode>,
+    pub zoom_step: i8,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub split: Option<SplitSession>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,6 +80,10 @@ pub struct GridSession {
 pub struct PaneSession {
     pub tabs: Vec<TabItem>,
     pub active: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_mode: Option<ViewMode>,
+    #[serde(default)]
+    pub zoom_step: i8,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -117,6 +124,8 @@ impl From<SplitSession> for GridSession {
         let mut panes = vec![PaneSession {
             tabs: split.tabs,
             active: split.active,
+            view_mode: None,
+            zoom_step: 0,
         }];
         let mut active_index = usize::from(split.right_active);
         let mut widths = vec![split.ratio, 1. - split.ratio];
@@ -124,6 +133,8 @@ impl From<SplitSession> for GridSession {
             panes.push(PaneSession {
                 tabs: third.tabs,
                 active: third.active,
+                view_mode: None,
+                zoom_step: 0,
             });
             active_index = third.active_index.min(2);
             widths[1] = third.middle_ratio;

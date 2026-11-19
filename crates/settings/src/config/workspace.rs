@@ -204,7 +204,14 @@ mod tests {
         );
         let workspace: Workspace = toml::from_str(&content)?;
         let restored: Workspace = toml::from_str(&toml::to_string_pretty(&workspace)?)?;
+        assert_eq!(restored.session.view_mode, None);
         let split = restored.session.split.unwrap();
+        assert!(
+            crate::config::tab::GridSession::from(split.clone())
+                .panes
+                .iter()
+                .all(|pane| pane.view_mode.is_none())
+        );
         assert_eq!(split.layout, SplitLayout::Stacked);
         assert_eq!(split.ratio, 0.3);
         let third = split.third.unwrap();
@@ -218,6 +225,7 @@ mod tests {
     #[test]
     fn restores_six_panes_with_independent_column_splits() -> Result<()> {
         use crate::config::tab::{GridSession, PaneColumn, PaneSession};
+        use crate::config::view::ViewMode;
 
         let pane = |index| {
             let id = Uuid::new_v4();
@@ -227,12 +235,20 @@ mod tests {
                     location: Location::directory(format!("/pane/{index}").into()),
                 }],
                 active: Some(id),
+                zoom_step: (index as i8 - 2).min(1),
+                view_mode: Some(if index == 0 {
+                    ViewMode::Grid
+                } else {
+                    ViewMode::List
+                }),
             }
         };
         let first = pane(0);
         let mut workspace = Workspace::default();
         workspace.session.tabs = first.tabs;
         workspace.session.active = first.active;
+        workspace.session.view_mode = first.view_mode;
+        workspace.session.zoom_step = first.zoom_step;
         workspace.session.grid = Some(GridSession {
             columns: [(2, [2, 1], 0.35), (2, [1, 1], 0.5), (1, [1, 1], 0.75)]
                 .into_iter()
@@ -250,6 +266,8 @@ mod tests {
 
         let restored: Workspace = toml::from_str(&toml::to_string_pretty(&workspace)?)?;
         assert_eq!(restored.session.active, first.active);
+        assert_eq!(restored.session.view_mode, Some(ViewMode::Grid));
+        assert_eq!(restored.session.zoom_step, -2);
         let grid = restored.session.grid.unwrap();
         assert_eq!(grid.active_index, 5);
         assert_eq!(
@@ -262,6 +280,8 @@ mod tests {
         assert_eq!(grid.columns[0].row_panes, [2, 1]);
         assert_eq!(grid.columns[0].pane_count(), 3);
         assert_eq!(grid.panes.len(), 5);
+        assert_eq!(grid.panes[4].view_mode, Some(ViewMode::List));
+        assert_eq!(grid.panes[4].zoom_step, 1);
         assert_eq!(
             grid.panes[4].tabs[0].location,
             Location::directory("/pane/5".into())

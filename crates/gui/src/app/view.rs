@@ -24,6 +24,7 @@ use super::keymap::{
 use super::preferences::{ActivePreferences, Preferences};
 use super::tabs::{BrowserTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
+use super::thumbnails::Thumbnails;
 use super::volumes::{SharedStorage, StorageDevices};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
@@ -36,6 +37,7 @@ use settings::config::general::StartupBehavior;
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
     pub(super) panes: Vec<BrowserPane>,
+    pub(super) thumbnails: Thumbnails,
     pub(super) pane_target: usize,
     pub(super) active_pane: usize,
     pub(super) pane_layout: PaneLayout,
@@ -64,6 +66,7 @@ impl Global for SharedTags {}
 impl App {
     pub fn open_main_window(cx: &mut gpui_kit::App) {
         cx.set_global(FileClipboard::default());
+        keymap::bind_cancel_cut(cx);
         cx.set_global(FileJobs::default());
         let writer = WorkspaceWriter::default();
         cx.set_global(writer.clone());
@@ -183,13 +186,15 @@ impl App {
 
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let pane = BrowserPane::new(tabs, active_tab, window, cx);
+        let mut pane = BrowserPane::new(tabs, active_tab, window, cx);
+        pane.restore_view(workspace.session.view_mode, workspace.session.zoom_step);
         let mut app = Self {
             focus,
             file_job: None,
             file_name_editor: None,
             directory_properties: None,
             panes: vec![pane],
+            thumbnails: Thumbnails::new(),
             pane_target: 0,
             active_pane: 0,
             pane_layout: PaneLayout::default(),
@@ -255,12 +260,29 @@ impl Render for App {
         let radius = if square { px(0.) } else { WINDOW_RADIUS };
         // 窗口最大化或全屏时，边框为 0
         let border = if square { px(0.) } else { px(1.) };
+        let pending_cut = cx.global::<FileClipboard>().can_cancel_cut();
         v_flex()
             .id("file-manager")
-            .key_context("FileManager")
+            .key_context(if pending_cut {
+                "FileManager PendingFileCut"
+            } else {
+                "FileManager"
+            })
             .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &keymap::CancelCut, window, cx| {
+                if this.focus.is_focused(window) && cx.global::<FileClipboard>().can_cancel_cut() {
+                    cx.stop_propagation();
+                    cx.global_mut::<FileClipboard>().cancel_cut();
+                }
+            }))
             .on_action(cx.listener(|this, action: &FileAction, window, cx| {
                 this.file_shortcut(*action, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &keymap::ZoomIn, window, cx| {
+                this.file_zoom_shortcut(1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &keymap::ZoomOut, window, cx| {
+                this.file_zoom_shortcut(-1, window, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &OpenTerminal, window, cx| this.toggle_terminal(window, cx)),

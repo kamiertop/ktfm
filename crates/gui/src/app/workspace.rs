@@ -186,8 +186,7 @@ mod tests {
         let session = |id| Session {
             tabs: Vec::new(),
             active: Some(id),
-            split: None,
-            grid: None,
+            ..Session::default()
         };
         let first = Uuid::new_v4();
         let latest = Uuid::new_v4();

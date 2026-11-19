@@ -19,3 +19,15 @@
   - 拖拽之后的放置策略
 - 书签
 -
+
+## 自定义文件图标
+
+把 SVG 或 PNG 放在 ktfm 配置目录的 `icons/` 子目录里。Linux 默认是
+`~/.config/ktfm/icons/`，设置了 `XDG_CONFIG_HOME` 时则是
+`$XDG_CONFIG_HOME/ktfm/icons/`。新增或替换后重启 ktfm 即可，无需重新编译。
+
+- 图标文件名用小写扩展名，例如 `pdf.svg` 匹配 `.pdf`，`tar.zst.png` 匹配 `.tar.zst`。
+- 也可以用 MIME 名称，把斜杠换成连字符，例如 `text-markdown.svg`，或只用子类型，例如 `markdown.svg`。
+- 想让图标随 ktfm 一起发布，把同样命名的文件放到仓库的 `assets/icons/`，下次构建会自动打包。
+
+网格中的缩略图优先显示。文件图标依次使用用户图标、随程序发布的图标、系统主题图标以及内置的通用图标。

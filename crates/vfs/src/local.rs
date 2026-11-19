@@ -119,6 +119,29 @@ fn entry_kind(kind: fs::FileType) -> EntryKind {
     }
 }
 
+/// 计算逻辑字节数。目录累加其内容，符号链接只计链接自身。
+pub fn entry_size(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<u64> {
+    let mut pending = vec![path.to_owned()];
+    let mut total = 0u64;
+    while let Some(path) = pending.pop() {
+        if cancelled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            for item in fs::read_dir(path)? {
+                if cancelled() {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                pending.push(item?.path());
+            }
+        } else if metadata.is_file() || metadata.is_symlink() {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,8 +186,8 @@ mod tests {
         fs::create_dir(&path)?;
         let result = (|| {
             fs::create_dir(path.join("z-folder"))?;
-            fs::write(path.join("z-folder/nested"), "")?;
-            fs::write(path.join("b.txt"), "")?;
+            fs::write(path.join("z-folder/nested"), "123")?;
+            fs::write(path.join("b.txt"), "12")?;
             fs::write(path.join(".a.txt"), "")?;
             #[cfg(unix)]
             let raw_name = {
@@ -188,6 +211,14 @@ mod tests {
                 assert_eq!(directory.entries[4].name, raw_name);
             }
             assert_eq!(directory.entries.len(), if cfg!(unix) { 5 } else { 3 });
+            assert_eq!(entry_size(&path.join("b.txt"), || false)?, 2);
+            assert_eq!(entry_size(&path.join("z-folder"), || false)?, 3);
+            let expected_total = if cfg!(unix) { 12 } else { 5 };
+            assert_eq!(entry_size(&path, || false)?, expected_total);
+            assert_eq!(
+                entry_size(&path, || true).unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
 
             let calls = std::cell::Cell::new(0);
             let error = read_directory(&path, || {
