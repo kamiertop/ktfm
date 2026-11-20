@@ -34,6 +34,12 @@ impl IoQueue {
         })
     }
 
+    pub(super) fn enqueue(&self, work: impl FnOnce() + Send + 'static) -> bool {
+        self.sender
+            .as_ref()
+            .is_some_and(|sender| sender.send(Box::new(work)).is_ok())
+    }
+
     pub(super) fn submit<R: Send + 'static>(
         cx: &mut App,
         work: impl FnOnce() -> settings::Result<R> + Send + 'static,
@@ -41,11 +47,9 @@ impl IoQueue {
     ) {
         let (result, completion) = async_channel::bounded(1);
         let queue = cx.global::<Self>();
-        if let Some(sender) = &queue.sender {
-            let _ = sender.send(Box::new(move || {
-                let _ = result.try_send(work());
-            }));
-        }
+        queue.enqueue(move || {
+            let _ = result.try_send(work());
+        });
         let previous = queue.callbacks.take();
         let callback = cx.spawn(async move |cx| {
             if let Some(previous) = previous {
@@ -77,14 +81,11 @@ mod tests {
     fn shutdown_drains_accepted_jobs_without_gui_callbacks() -> io::Result<()> {
         let mut queue = IoQueue::new()?;
         let (result, completed) = mpsc::channel();
-        let sender = queue.sender.as_ref().expect("存储线程已启动");
         for index in 0..3 {
             let result = result.clone();
-            sender
-                .send(Box::new(move || {
-                    let _ = result.send(index);
-                }))
-                .expect("提交成功");
+            assert!(queue.enqueue(move || {
+                let _ = result.send(index);
+            }));
         }
         queue.finish();
         assert_eq!(completed.try_iter().collect::<Vec<_>>(), [0, 1, 2]);

@@ -21,6 +21,7 @@ mod thumbnails;
 mod title_bar;
 mod view;
 mod volumes;
+mod window_geometry;
 mod window_resize;
 mod workspace;
 

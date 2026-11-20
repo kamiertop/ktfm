@@ -26,12 +26,11 @@ use super::tabs::{BrowserTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
 use super::thumbnails::Thumbnails;
 use super::volumes::{SharedStorage, StorageDevices};
+use super::window_geometry::{self, GeometrySaver};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
 use crate::model::{SidebarItem, default_favorites, home_directory};
-use crate::style::{
-    APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_RADIUS, WINDOW_WIDTH,
-};
+use crate::style::{APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_RADIUS};
 use settings::config::general::StartupBehavior;
 
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
@@ -78,7 +77,9 @@ impl App {
                 return;
             }
         }
+        cx.set_global(GeometrySaver::default());
         cx.on_app_quit(move |cx| {
+            GeometrySaver::flush(cx);
             cx.global_mut::<IoQueue>().finish();
             writer.flush();
             std::future::ready(())
@@ -101,25 +102,29 @@ impl App {
         cx: &mut gpui_kit::App,
         target: Option<(PathBuf, Entity<Bookmarks>)>,
     ) -> Result<WindowHandle<Self>> {
+        let workspace = Workspace::load();
+        let saved_size = workspace
+            .as_ref()
+            .ok()
+            .and_then(|workspace| workspace.window_size);
         let options = WindowOptions {
             app_id: Some(APP_ID.into()),
-            window_bounds: Some(WindowBounds::centered(
-                size(WINDOW_WIDTH, WINDOW_HEIGHT),
-                cx,
-            )),
+            // 恢复上次记住的窗口大小，没有记录时退回默认大小
+            window_bounds: Some(window_geometry::startup_bounds(saved_size, cx)),
             window_min_size: Some(size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)),
             window_background: WindowBackgroundAppearance::Transparent,
             window_decorations: Some(WindowDecorations::Client),
             ..TitleBar::window_options()
         };
         cx.open_window(options, |window, cx| {
-            cx.new(|cx| Self::new(window, target, cx))
+            cx.new(|cx| Self::new(window, target, workspace, cx))
         })
     }
 
     fn new(
         window: &mut Window,
         target: Option<(PathBuf, Entity<Bookmarks>)>,
+        workspace: settings::Result<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
         let home = home_directory();
@@ -137,14 +142,17 @@ impl App {
             }
             cx.set_global(ActivePreferences(config));
         }
-        let (mut workspace, workspace_error) =
-            match persist_session.then(Workspace::load).transpose() {
-                Ok(workspace) => (workspace.unwrap_or_default(), None),
-                Err(error) => (
-                    Workspace::default(),
-                    Some(format!("无法加载工作区：{error}")),
-                ),
-            };
+        let (mut workspace, workspace_error) = match workspace {
+            Ok(workspace) => (workspace, None),
+            Err(error) if !persist_session => {
+                tracing::warn!(%error, "无法读取窗口大小");
+                (Workspace::default(), None)
+            }
+            Err(error) => (
+                Workspace::default(),
+                Some(format!("无法加载工作区：{error}")),
+            ),
+        };
         let tag_state = cx.global::<SharedTags>().0.clone();
         let (tabs, active_tab, bookmarks) = if let Some((path, bookmarks)) = target {
             (
@@ -231,6 +239,7 @@ impl App {
         })
         .detach();
         cx.observe(&app.storage, |_, _, cx| cx.notify()).detach();
+        GeometrySaver::observe(window, cx);
         app.load_directory(cx);
         if persist_session
             && matches!(

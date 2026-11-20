@@ -17,6 +17,24 @@ pub struct Workspace {
     #[serde(alias = "stars")]
     pub bookmarks: Bookmarks,
     pub session: Session,
+    /// 上次记住的窗口大小，下次启动时恢复
+    pub window_size: Option<WindowSize>,
+}
+
+/// 记住的窗口大小（逻辑像素）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSize {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowSize {
+    /// 丢弃 NaN/无穷/过小等异常值，避免把不可用的尺寸写进工作区。
+    pub fn sanitize(self) -> Option<Self> {
+        (self.width.is_finite() && self.height.is_finite() && self.width >= 1. && self.height >= 1.)
+            .then_some(self)
+    }
 }
 
 impl Workspace {
@@ -287,6 +305,69 @@ mod tests {
             Location::directory("/pane/5".into())
         );
         Ok(())
+    }
+
+    #[test]
+    fn window_size_roundtrips_and_defaults_to_none() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("ktfm-test-window-size-{}", Uuid::new_v4()));
+        fs::create_dir(&dir)?;
+        let result = (|| {
+            let file = dir.join(FILE_NAME);
+            let mut workspace = Workspace::default();
+            workspace.window_size = Some(WindowSize {
+                width: 1440.,
+                height: 860.,
+            });
+            workspace.save_to(&file)?;
+
+            let restored = Workspace::load_from(&file)?;
+            assert_eq!(
+                restored.window_size,
+                Some(WindowSize {
+                    width: 1440.,
+                    height: 860.,
+                })
+            );
+
+            // 旧版工作区文件没有 window_size 字段时应回退为 None
+            fs::write(&file, "[session]\ntabs = []\n")?;
+            assert_eq!(Workspace::load_from(&file)?.window_size, None);
+            Ok(())
+        })();
+        fs::remove_dir_all(dir)?;
+        result
+    }
+
+    #[test]
+    fn window_size_sanitizes_invalid_values() {
+        assert_eq!(
+            WindowSize {
+                width: 800.,
+                height: 600.
+            }
+            .sanitize(),
+            Some(WindowSize {
+                width: 800.,
+                height: 600.
+            })
+        );
+        assert_eq!(
+            WindowSize {
+                width: f32::NAN,
+                height: 600.
+            }
+            .sanitize(),
+            None
+        );
+        assert_eq!(
+            WindowSize {
+                width: 0.,
+                height: 600.
+            }
+            .sanitize(),
+            None,
+            "过小的尺寸不应写入工作区"
+        );
     }
 
     #[test]
