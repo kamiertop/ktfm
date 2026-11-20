@@ -62,6 +62,7 @@ struct FileLayout {
     grid: bool,
     icon_size: Pixels,
     tile_width: Pixels,
+    slot_width: Pixels,
     columns: usize,
 }
 
@@ -82,10 +83,12 @@ impl FileLayout {
         if grid {
             icon_size = icon_size.min((tile_width - GRID_CARD_PADDING * 2.).max(px(1.)));
         }
+        let slot_width = (content_width - GRID_GAP * (columns - 1)) / columns as f32;
         Self {
             grid,
             icon_size,
             tile_width,
+            slot_width,
             columns,
         }
     }
@@ -563,7 +566,18 @@ impl App {
             .when(!layout.grid, |row| row.h(layout.row_height()))
             .children((start..end).filter_map(|position| {
                 let index = self.panes[self.pane_target].browser.visible[position];
-                self.file_entry(index, layout, window, cx)
+                let entry = self.file_entry(index, layout, window, cx)?;
+                Some(if layout.grid {
+                    // 等宽列槽铺满视口，卡片居中；两侧空白由文件区处理点击。
+                    h_flex()
+                        .w(layout.slot_width)
+                        .flex_shrink_0()
+                        .justify_center()
+                        .child(entry)
+                        .into_any_element()
+                } else {
+                    entry.into_any_element()
+                })
             }))
     }
 
@@ -753,6 +767,17 @@ mod tests {
         assert!(enlarged.tile_width > original.tile_width);
         let used = enlarged.tile_width * enlarged.columns + GRID_GAP * (enlarged.columns - 1);
         assert!(used <= width - GRID_MARGIN * 2.);
+    }
+
+    #[test]
+    fn grid_spreads_unused_width_without_stretching_cards() {
+        let first = FileLayout::new(ViewMode::Grid, 0, px(680.));
+        let wider = FileLayout::new(ViewMode::Grid, 0, px(780.));
+        assert_eq!(first.columns, wider.columns);
+        assert_eq!(first.tile_width, wider.tile_width);
+        assert!(wider.slot_width > first.slot_width);
+        let used = wider.slot_width * wider.columns + GRID_GAP * (wider.columns - 1);
+        assert!((used - (px(780.) - GRID_MARGIN * 2.)).as_f32().abs() < 0.01);
     }
 
     #[test]
