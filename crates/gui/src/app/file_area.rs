@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::menu::ContextMenuExt;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -28,8 +28,16 @@ use crate::components::{icon_button, truncated_text, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::file_selection_color;
 
-const CONTENT_PADDING: Pixels = px(16.);
-const FILE_AREA_BOTTOM_PADDING: Pixels = px(16.);
+// 列表视口的边距独立于缩放。右侧依次为背景点击区和滚动条轨道。
+const LIST_LEFT_PADDING: Pixels = px(16.);
+const LIST_BOTTOM_PADDING: Pixels = px(16.);
+// 列表右侧的背景点击区宽度
+const LIST_BACKGROUND_CLICK_WIDTH: Pixels = px(24.);
+const LIST_SCROLLBAR_WIDTH: Pixels = px(12.);
+// 行内字段的留白与行外的背景点击区独立。
+const LIST_ROW_FIELD_PADDING: Pixels = px(12.);
+
+// 网格列宽按窗格宽度计算，背景点击使用卡片之间的空隙。
 const GRID_MARGIN: Pixels = px(18.);
 // 网格之间的距离
 const GRID_GAP: Pixels = px(18.);
@@ -70,19 +78,22 @@ impl FileLayout {
     fn new(mode: ViewMode, step: i8, width: Pixels) -> Self {
         let grid = mode == ViewMode::Grid;
         let mut icon_size = zoom_icon_size(mode, step);
+        if !grid {
+            return Self {
+                grid,
+                icon_size,
+                tile_width: px(0.),
+                slot_width: px(0.),
+                columns: 1,
+            };
+        }
         let content_width = (width - GRID_MARGIN * 2.).max(px(1.));
         let tile_width =
             (icon_size + (GRID_ICON_SIDE_SPACE + GRID_CARD_PADDING) * 2.).min(content_width);
-        let columns = if grid {
-            ((content_width + GRID_GAP) / (tile_width + GRID_GAP))
-                .floor()
-                .max(1.) as usize
-        } else {
-            1
-        };
-        if grid {
-            icon_size = icon_size.min((tile_width - GRID_CARD_PADDING * 2.).max(px(1.)));
-        }
+        let columns = ((content_width + GRID_GAP) / (tile_width + GRID_GAP))
+            .floor()
+            .max(1.) as usize;
+        icon_size = icon_size.min((tile_width - GRID_CARD_PADDING * 2.).max(px(1.)));
         let slot_width = (content_width - GRID_GAP * (columns - 1)) / columns as f32;
         Self {
             grid,
@@ -166,6 +177,7 @@ impl App {
         let browser = &pane.browser;
         let count = browser.visible.len();
         let layout = FileLayout::new(pane.view_mode, pane.zoom_step, width);
+        let show_list_scrollbar = !window.is_inspector_picking(cx);
         let selected = browser.selection_len();
         let selection_details = browser.single_selected_entry().map(|entry| {
             let size = match browser.selected_size() {
@@ -328,10 +340,24 @@ impl App {
                                 )
                                 .track_scroll(&self.panes[self.pane_target].browser.scroll)
                                 .size_full()
-                                .px(CONTENT_PADDING)
-                                .pb(FILE_AREA_BOTTOM_PADDING),
+                                .pl(LIST_LEFT_PADDING)
+                                .pr(LIST_BACKGROUND_CLICK_WIDTH + LIST_SCROLLBAR_WIDTH)
+                                .pb(LIST_BOTTOM_PADDING),
                             )
-                            .vertical_scrollbar(&self.panes[self.pane_target].browser.scroll)
+                            .when(show_list_scrollbar, |content| {
+                                content.child(
+                                    div().absolute().inset_0().child(
+                                        Scrollbar::vertical(
+                                            &self.panes[self.pane_target].browser.scroll,
+                                        )
+                                        .id("file-list-scrollbar")
+                                        .viewport_from_layout()
+                                        .styles(|styles| {
+                                            styles.track(|track| track.width(LIST_SCROLLBAR_WIDTH))
+                                        }),
+                                    ),
+                                )
+                            })
                     })
                     .child(
                         canvas(
@@ -654,7 +680,7 @@ impl App {
                         .flex_shrink_0()
                 })
                 .when(!grid, |entry| {
-                    entry.gap_2().px_3().h(layout.row_height() - px(4.)).w_full().min_w_0()
+                    entry.gap_2().px(LIST_ROW_FIELD_PADDING).h(layout.row_height() - px(4.)).w_full().min_w_0()
                 })
                 .when_some(folder_drag, |entry, folder| {
                     entry.on_drag(folder, BookmarkDrag::preview)
@@ -706,6 +732,7 @@ impl App {
                         .min_w_0()
                         .max_w_full()
                         .when(grid, |label| label.w_full())
+                        .when(!grid, |label| label.flex_1())
                         .opacity(content_opacity)
                         .child(
                             div()
@@ -736,8 +763,8 @@ impl App {
                 .when(!grid, |row| {
                     row.child(
                         div()
-                            .ml_auto()
-                            .flex_shrink_0()
+                            .max_w(relative(0.4))
+                            .truncate()
                             .text_sm()
                             .text_color(detail_color.opacity(content_opacity))
                             .child(kind),
