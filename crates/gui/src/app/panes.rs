@@ -1,7 +1,9 @@
-use std::cell::Cell;
-
+use gpui_kit::base::ElementExt as _;
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::resizable::{
+    ResizablePanelGroup, h_resizable, resizable_panel, v_resizable,
+};
+use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::{
@@ -18,7 +20,6 @@ use super::tabs::{BrowserTab, restore_tab_items};
 use super::tags::TagChange;
 use crate::style::{SIDEBAR_WIDTH, TITLE_BAR_HEIGHT};
 
-const DIVIDER: Pixels = px(6.);
 const MAX_COLUMNS: usize = 3;
 const MAX_PANES: usize = 6;
 
@@ -50,6 +51,7 @@ const MIN_ROW_HEIGHT: Pixels = px(140.);
 
 pub(super) struct BrowserPane {
     pub(super) id: Uuid,
+    measured_size: Option<Size<Pixels>>,
     pub(super) tabs: Vec<BrowserTab>,
     pub(super) active_tab: usize,
     pub(super) navigation_revision: u64,
@@ -85,6 +87,7 @@ impl BrowserPane {
         .detach();
         Self {
             id,
+            measured_size: None,
             tabs,
             active_tab,
             navigation_revision: 0,
@@ -97,25 +100,11 @@ impl BrowserPane {
     }
 }
 
-struct PaneResize {
-    target: ResizeTarget,
-    divider: usize,
-    offset: Cell<Pixels>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ResizeTarget {
+#[derive(Clone, Copy)]
+enum SplitGroup {
     Columns,
     Rows(usize),
     RowPanes(usize, usize),
-}
-
-struct ResizePreview;
-
-impl Render for ResizePreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
 }
 
 impl App {
@@ -383,137 +372,38 @@ impl App {
         let ids: Vec<_> = self.ordered_panes().map(|pane| pane.id).collect();
         let columns = self.pane_layout.columns.clone();
         let widths = column_extents(width, &columns);
+        let column_minimum = MIN_COLUMN_WIDTH.min(width / columns.len() as f32);
+        let structure: Vec<_> = columns
+            .iter()
+            .map(|column| (column.rows, column.row_panes))
+            .collect();
+        // 分屏结构变化时，组件按新布局的比例重新初始化尺寸。
+        let group_id = SharedString::from(format!("browser-split-{ids:?}-{structure:?}"));
+        let mut area = self.resizable_group(h_resizable(group_id), SplitGroup::Columns, cx);
         let mut start = 0;
-        let mut area = h_flex()
-            .id("browser-split")
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .items_stretch()
-            .on_drag_move::<PaneResize>(cx.listener(
-                |app, event: &DragMoveEvent<PaneResize>, _, cx| {
-                    let drag = event.drag(cx);
-                    let count = app.pane_layout.columns.len();
-                    if drag.target != ResizeTarget::Columns || drag.divider + 1 >= count {
-                        return;
-                    }
-                    let divider = drag.divider;
-                    let extent = event.bounds.size.width;
-                    let available = extent - DIVIDER * (count - 1) as f32;
-                    if available <= MIN_COLUMN_WIDTH * count as f32 {
-                        return;
-                    }
-                    let mut sizes = column_extents(extent, &app.pane_layout.columns);
-                    let preceding: Pixels = sizes[..divider].iter().copied().sum();
-                    let pair = sizes[divider] + sizes[divider + 1];
-                    let position = event.event.position.x
-                        - event.bounds.left()
-                        - drag.offset.get()
-                        - DIVIDER * divider as f32
-                        - preceding;
-                    sizes[divider] = position.clamp(
-                        MIN_COLUMN_WIDTH,
-                        (pair - MIN_COLUMN_WIDTH).max(MIN_COLUMN_WIDTH),
-                    );
-                    sizes[divider + 1] = pair - sizes[divider];
-                    for (column, size) in app.pane_layout.columns.iter_mut().zip(sizes) {
-                        column.width_ratio = size / available;
-                    }
-                    cx.notify();
-                },
-            ))
-            .on_drop(cx.listener(|app, _: &PaneResize, _, cx| app.save_workspace(cx)));
         for (index, column) in columns.into_iter().enumerate() {
-            if index != 0 {
-                area = area.child(pane_divider(ResizeTarget::Columns, index - 1, cx));
-            }
             let width = widths[index];
-            let mut element = v_flex()
-                .id(("browser-column", index))
-                .w(width)
-                .h(height)
-                .items_stretch()
-                .flex_shrink_0()
-                .min_w_0()
-                .min_h_0()
-                .on_drag_move::<PaneResize>(cx.listener(
-                    move |app, event: &DragMoveEvent<PaneResize>, _, cx| {
-                        let drag = event.drag(cx);
-                        let available = event.bounds.size.height - DIVIDER;
-                        if drag.target != ResizeTarget::Rows(index)
-                            || available <= MIN_ROW_HEIGHT * 2.
-                        {
-                            return;
-                        }
-                        let position =
-                            event.event.position.y - event.bounds.top() - drag.offset.get();
-                        if let Some(column) = app
-                            .pane_layout
-                            .columns
-                            .get_mut(index)
-                            .filter(|column| column.rows == 2)
-                        {
-                            column.top_ratio = position
-                                .clamp(MIN_ROW_HEIGHT, available - MIN_ROW_HEIGHT)
-                                / available;
-                            cx.notify();
-                        }
-                    },
-                ));
-            let available = (height - DIVIDER).max(px(0.));
-            let minimum = MIN_ROW_HEIGHT.min(available / 2.);
-            let top = (available * column.top_ratio).clamp(minimum, available - minimum);
+            let minimum = MIN_ROW_HEIGHT.min(height / column.rows as f32);
+            let top = (height * column.top_ratio).clamp(minimum, (height - minimum).max(minimum));
+            let mut rows =
+                self.resizable_group(v_resizable("browser-column"), SplitGroup::Rows(index), cx);
             for row in 0..column.rows {
-                if row != 0 {
-                    element = element.child(pane_divider(ResizeTarget::Rows(index), 0, cx));
-                }
                 let height = match (column.rows, row) {
                     (1, _) => height,
                     (_, 0) => top,
-                    _ => available - top,
+                    _ => height - top,
                 };
                 let count = column.row_panes[row];
-                let target = ResizeTarget::RowPanes(index, row);
-                let widths = row_extents(width, count, column.row_ratios[row]);
-                let mut line = h_flex()
-                    .id(("browser-row", row))
-                    .w_full()
-                    .h(height)
-                    .flex_shrink_0()
-                    .items_stretch()
-                    .on_drag_move::<PaneResize>(cx.listener(
-                        move |app, event: &DragMoveEvent<PaneResize>, _, cx| {
-                            let drag = event.drag(cx);
-                            let divider = drag.divider;
-                            let extent = event.bounds.size.width;
-                            let available = extent - DIVIDER * (count - 1) as f32;
-                            let minimum = px(100.);
-                            if drag.target != target
-                                || divider + 1 >= count
-                                || available <= minimum * count as f32
-                            {
-                                return;
-                            }
-                            let ratios = &mut app.pane_layout.columns[index].row_ratios[row];
-                            let mut widths = row_extents(extent, count, *ratios);
-                            let preceding: Pixels = widths[..divider].iter().copied().sum();
-                            let pair = widths[divider] + widths[divider + 1];
-                            let position = event.event.position.x
-                                - event.bounds.left()
-                                - drag.offset.get()
-                                - DIVIDER * divider as f32
-                                - preceding;
-                            widths[divider] =
-                                position.clamp(minimum, (pair - minimum).max(minimum));
-                            widths[divider + 1] = pair - widths[divider];
-                            *ratios = widths.map(|width| width / available);
-                            cx.notify();
-                        },
-                    ));
-                for (position, &id) in ids[start..start + count].iter().enumerate() {
-                    if position != 0 {
-                        line = line.child(pane_divider(target, position - 1, cx));
-                    }
+                let row_ids = &ids[start..start + count];
+                // 内层最小宽度总和须能放进外层列的最小宽度。
+                let row_minimum = px(100.).min(column_minimum / count as f32);
+                let widths = row_extents(width, row_minimum, count, column.row_ratios[row]);
+                let mut line = self.resizable_group(
+                    h_resizable(("browser-row", row)),
+                    SplitGroup::RowPanes(index, row),
+                    cx,
+                );
+                for (position, &id) in row_ids.iter().enumerate() {
                     let pane = self
                         .with_pane(id, |app| {
                             app.browser_pane(
@@ -525,14 +415,65 @@ impl App {
                             )
                         })
                         .expect("窗格存在");
-                    line = line.child(pane);
+                    line = line.child(
+                        resizable_panel()
+                            .size(widths[position])
+                            .size_range(row_minimum..Pixels::MAX)
+                            .child(pane),
+                    );
                 }
                 start += count;
-                element = element.child(line);
+                rows = rows.child(
+                    resizable_panel()
+                        .size(height)
+                        .size_range(minimum..Pixels::MAX)
+                        .child(line),
+                );
             }
-            area = area.child(element);
+            area = area.child(
+                resizable_panel()
+                    .size(width)
+                    .size_range(column_minimum..Pixels::MAX)
+                    .child(rows),
+            );
         }
         area.into_any_element()
+    }
+
+    fn resizable_group(
+        &self,
+        group: ResizablePanelGroup,
+        target: SplitGroup,
+        cx: &Context<Self>,
+    ) -> ResizablePanelGroup {
+        let owner = cx.weak_entity();
+        group.on_resize(move |state, _, cx| {
+            let sizes = state.read(cx).sizes().clone();
+            let total: Pixels = sizes.iter().copied().sum();
+            if total <= px(0.) {
+                return;
+            }
+            let _ = owner.update(cx, |app, cx| {
+                match target {
+                    SplitGroup::Columns => {
+                        for (column, size) in app.pane_layout.columns.iter_mut().zip(&sizes) {
+                            column.width_ratio = *size / total;
+                        }
+                    }
+                    SplitGroup::Rows(column) => {
+                        app.pane_layout.columns[column].top_ratio = sizes[0] / total;
+                    }
+                    SplitGroup::RowPanes(column, row) => {
+                        let ratios = &mut app.pane_layout.columns[column].row_ratios[row];
+                        for (ratio, size) in ratios.iter_mut().zip(&sizes) {
+                            *ratio = *size / total;
+                        }
+                    }
+                }
+                app.save_workspace(cx);
+                cx.notify();
+            });
+        })
     }
 
     fn browser_pane(
@@ -543,7 +484,11 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let id = self.panes[self.pane_target].id;
+        let pane = &self.panes[self.pane_target];
+        let id = pane.id;
+        let measured_size = pane.measured_size;
+        let size = measured_size.filter(|_| split).unwrap_or(size);
+        let owner = cx.weak_entity();
         let theme = cx.theme();
         let top_border = if active { theme.primary } else { theme.border };
         v_flex()
@@ -552,9 +497,22 @@ impl App {
             .min_h_0()
             .overflow_hidden()
             .when(split, |pane| {
-                pane.w(size.width)
-                    .h(size.height)
-                    .flex_shrink_0()
+                pane.size_full()
+                    .on_prepaint(move |bounds, window, cx| {
+                        if measured_size == Some(bounds.size) {
+                            return;
+                        }
+                        // 网格列数和标签宽度使用组件实际分配的尺寸。
+                        let owner = owner.clone();
+                        window.defer(cx, move |_, cx| {
+                            let _ = owner.update(cx, |app, cx| {
+                                if let Some(index) = app.pane_index(id) {
+                                    app.panes[index].measured_size = Some(bounds.size);
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    })
                     .child(div().h(px(2.)).flex_shrink_0().bg(top_border))
                     .capture_any_mouse_down(cx.listener(move |app, _, window, cx| {
                         if let Some(index) = app.pane_index(id)
@@ -582,46 +540,14 @@ impl App {
     }
 }
 
-fn pane_divider(
-    target: ResizeTarget,
-    divider: usize,
-    cx: &Context<App>,
-) -> impl IntoElement + use<> {
-    let vertical = matches!(target, ResizeTarget::Rows(_));
-    let border = cx.theme().border;
-    let accent = cx.theme().accent;
-    div()
-        .id(("pane-divider", divider))
-        .when(vertical, |divider| {
-            divider.h(DIVIDER).cursor(CursorStyle::ResizeUpDown)
-        })
-        .when(!vertical, |divider| {
-            divider.w(DIVIDER).cursor(CursorStyle::ResizeLeftRight)
-        })
-        .flex_shrink_0()
-        .bg(border)
-        .hover(move |style| style.bg(accent))
-        .on_drag(
-            PaneResize {
-                target,
-                divider,
-                offset: Cell::new(px(0.)),
-            },
-            move |drag, offset, _, cx| {
-                drag.offset.set(if vertical { offset.y } else { offset.x });
-                cx.new(|_| ResizePreview)
-            },
-        )
-}
-
-fn row_extents(width: Pixels, count: usize, ratios: [f32; 3]) -> [Pixels; 3] {
+fn row_extents(width: Pixels, minimum: Pixels, count: usize, ratios: [f32; 3]) -> [Pixels; 3] {
     let sum: f32 = ratios[..count].iter().sum();
     let ratios = if sum.is_finite() && sum > 0. && ratios.iter().all(|ratio| *ratio >= 0.) {
         ratios.map(|ratio| ratio / sum)
     } else {
         [1. / count as f32; 3]
     };
-    pane_extents(width, px(100.), count, ratios)
+    pane_extents(width, minimum, count, ratios)
 }
 
 fn column_extents(width: Pixels, columns: &[PaneColumn]) -> [Pixels; MAX_COLUMNS] {
@@ -633,7 +559,7 @@ fn column_extents(width: Pixels, columns: &[PaneColumn]) -> [Pixels; MAX_COLUMNS
 }
 
 fn pane_extents(extent: Pixels, minimum: Pixels, count: usize, ratios: [f32; 3]) -> [Pixels; 3] {
-    let available = (extent - DIVIDER * (count - 1) as f32).max(px(0.));
+    let available = extent.max(px(0.));
     let minimum = minimum.min(available / count as f32);
     let mut sizes = [px(0.); 3];
     let mut remaining = available;
@@ -648,14 +574,14 @@ fn pane_extents(extent: Pixels, minimum: Pixels, count: usize, ratios: [f32; 3])
 
 #[cfg(test)]
 mod tests {
-    use super::{DIVIDER, pane_extents};
+    use super::pane_extents;
     use gpui_kit::px;
 
     #[test]
     fn three_panes_share_space_equally_including_narrow_windows() {
         for extent in [px(430.), px(1200.)] {
             let sizes = pane_extents(extent, px(200.), 3, [1. / 3.; 3]);
-            let expected = (extent - DIVIDER * 2.) / 3.;
+            let expected = extent / 3.;
             assert!(
                 sizes
                     .into_iter()
