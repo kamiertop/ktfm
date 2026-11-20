@@ -55,55 +55,27 @@ pub fn home_directory() -> Option<PathBuf> {
 }
 
 pub fn entry_appearance(kind: EntryKind, path: &Path) -> (IconName, &'static str, bool) {
-    match kind {
-        EntryKind::Directory => (IconName::Folder, "文件夹", false),
-        EntryKind::File => {
-            let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-            match extension.to_ascii_lowercase().as_str() {
-                "mp4" | "m4v" | "mkv" | "webm" | "mov" | "avi" | "wmv" | "flv" | "mpeg" | "mpg"
-                | "mts" | "m2ts" | "3gp" => (IconName::Film, "视频", true),
-                "mp3" | "m4a" | "flac" | "ogg" | "oga" | "opus" | "wav" | "aac" | "aif"
-                | "aiff" | "wma" => (IconName::FileMusic, "音频", true),
-                "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif" => {
-                    (IconName::Image, "图片", true)
-                }
-                "svg" | "ico" | "heic" | "heif" => (IconName::Image, "图片", false),
-                "zip" | "7z" | "rar" | "tar" | "gz" | "xz" | "bz2" | "zst" | "tgz" => {
-                    (IconName::FileArchive, "压缩包", false)
-                }
-                "pdf" => (IconName::FileType, "PDF 文档", false),
-                "doc" | "docx" | "docm" | "dot" | "dotx" | "dotm" => {
-                    (IconName::FileText, "Word 文档", false)
-                }
-                "ppt" | "pptx" | "pptm" | "pps" | "ppsx" | "ppsm" | "pot" | "potx" | "potm" => {
-                    (IconName::Presentation, "PowerPoint 演示文稿", false)
-                }
-                "xls" | "xlsx" | "xlsm" | "xlsb" | "xlt" | "xltx" | "xltm" => {
-                    (IconName::FileSpreadsheet, "Excel 工作簿", false)
-                }
-                "csv" => (IconName::Table2, "CSV 表格", false),
-                "tsv" => (IconName::Table2, "TSV 表格", false),
-                "odt" | "ott" | "wps" | "wpt" | "pages" | "rtf" => {
-                    (IconName::FileText, "文字文档", false)
-                }
-                "odp" | "otp" | "dps" | "dpt" | "key" => {
-                    (IconName::Presentation, "演示文稿", false)
-                }
-                "ods" | "ots" | "et" | "ett" | "numbers" => {
-                    (IconName::FileSpreadsheet, "电子表格", false)
-                }
-                "txt" | "log" | "md" | "markdown" => (IconName::File, "文本文件", false),
-                "epub" | "mobi" | "azw" | "azw3" => (IconName::BookOpen, "电子书", false),
-                "eml" | "msg" => (IconName::Mail, "邮件", false),
-                "ics" => (IconName::Calendar, "日历文件", false),
-                "vcf" => (IconName::Contact, "联系人文件", false),
-                "rs" | "py" | "js" | "ts" | "html" | "css" | "json" | "toml" | "yml" | "yaml"
-                | "sh" => (IconName::FileCode, "代码", false),
-                _ => (IconName::File, "文件", false),
-            }
-        }
-        EntryKind::Symlink => (IconName::Link, "符号链接", false),
-        EntryKind::Other => (IconName::File, "其他", false),
-        EntryKind::Missing => (IconName::File, "不可用", false),
-    }
+    use daemon::file_type::{FileType, file_type};
+
+    let kind = file_type(kind, path);
+    let icon = match kind {
+        FileType::Folder => IconName::Folder,
+        FileType::Video => IconName::Film,
+        FileType::Audio => IconName::FileMusic,
+        FileType::ImagePreview | FileType::Image => IconName::Image,
+        FileType::Archive => IconName::FileArchive,
+        FileType::Pdf => IconName::FileType,
+        FileType::Word | FileType::Document => IconName::FileText,
+        FileType::PowerPoint | FileType::Presentation => IconName::Presentation,
+        FileType::Excel | FileType::Spreadsheet => IconName::FileSpreadsheet,
+        FileType::Csv | FileType::Tsv => IconName::Table2,
+        FileType::Text | FileType::File | FileType::Other | FileType::Missing => IconName::File,
+        FileType::Book => IconName::BookOpen,
+        FileType::Mail => IconName::Mail,
+        FileType::Calendar => IconName::Calendar,
+        FileType::Contact => IconName::Contact,
+        FileType::Code => IconName::FileCode,
+        FileType::Symlink => IconName::Link,
+    };
+    (icon, kind.label(), kind.previewable())
 }

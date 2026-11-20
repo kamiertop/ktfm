@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -7,10 +8,11 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 use settings::config::tab::Location;
 use settings::config::view::ViewMode;
-use vfs::{Directory, DirectoryWatch, Entry, EntryKind, read_directory, read_references};
+use vfs::{DirectoryWatch, Entry, EntryKind};
 
 use super::App;
 use crate::model::entry_appearance;
+use daemon::browse::{ChildCount, ChildCountMonitor, DirectorySnapshot, FileSort, ReadSource};
 
 const ESTIMATED_GRID_ROW_PADDING: Pixels = px(60.);
 
@@ -19,29 +21,6 @@ pub(super) enum DirectoryState {
     Loading { show_message: bool },
     Ready(Arc<DirectorySnapshot>),
     Failed(String),
-}
-
-pub(super) struct DirectorySnapshot {
-    pub(super) directory: Directory,
-    indices: HashMap<PathBuf, usize>,
-}
-
-impl DirectorySnapshot {
-    fn new(directory: Directory) -> Self {
-        let indices = directory
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.path.clone(), index))
-            .collect();
-        Self { directory, indices }
-    }
-}
-
-enum ReadSource {
-    Directory(PathBuf),
-    Tag(Vec<PathBuf>),
-    MissingTag,
 }
 
 struct ReadTask {
@@ -94,11 +73,21 @@ struct Selection {
     anchor: Option<PathBuf>,
 }
 
+#[derive(PartialEq, Eq)]
+enum ChildCountScope {
+    Visible(Range<usize>),
+    Sorted,
+}
+
 pub(super) struct Browser {
     pub(super) state: DirectoryState,
     pub(super) query: String,
     pub(super) show_hidden: bool,
     pub(super) visible: Vec<usize>,
+    sort: FileSort,
+    child_counts: HashMap<usize, ChildCount>,
+    child_count_scope: Option<ChildCountScope>,
+    child_count_task: Option<ReadTask>,
     selection: Selection,
     pub(super) reveal_path: Option<PathBuf>,
     pub(super) reveal_row: Option<usize>,
@@ -126,7 +115,7 @@ impl Browser {
         }
     }
 
-    fn entry(&self, index: usize) -> Option<&Entry> {
+    pub(super) fn entry(&self, index: usize) -> Option<&Entry> {
         self.snapshot()?.directory.entries.get(index)
     }
 
@@ -197,10 +186,9 @@ impl Browser {
             && let Some(start) = self
                 .selection
                 .anchor
-                .as_ref()
-                .and_then(|anchor| self.snapshot()?.indices.get(anchor))
-                .and_then(|anchor| self.visible.binary_search(anchor).ok())
-            && let Ok(end) = self.visible.binary_search(&index)
+                .as_deref()
+                .and_then(|anchor| self.visible_position(anchor))
+            && let Some(end) = self.visible.iter().position(|&entry| entry == index)
         {
             let paths: Vec<_> = self.visible[start.min(end)..=start.max(end)]
                 .iter()
@@ -238,9 +226,13 @@ impl Browser {
         let DirectoryState::Ready(snapshot) = &self.state else {
             return;
         };
+        if self.selection.paths.is_empty() && self.selection.anchor.is_none() {
+            return;
+        }
+        let visible_indices: HashSet<_> = self.visible.iter().copied().collect();
         let visible = |path: &Path| {
             snapshot.indices.get(path).is_some_and(|index| {
-                self.visible.binary_search(index).is_ok()
+                visible_indices.contains(index)
                     && (!drop_missing
                         || snapshot.directory.entries[*index].kind != EntryKind::Missing)
             })
@@ -261,9 +253,27 @@ impl Browser {
     }
 
     fn visible_position(&self, path: &Path) -> Option<usize> {
-        self.visible
-            .binary_search(self.snapshot()?.indices.get(path)?)
-            .ok()
+        let index = *self.snapshot()?.indices.get(path)?;
+        self.visible.iter().position(|&entry| entry == index)
+    }
+
+    pub(super) fn child_count(&self, index: usize) -> Option<u64> {
+        self.child_counts.get(&index)?.count
+    }
+
+    pub(super) fn stop_child_counts(&mut self) {
+        self.child_count_scope = None;
+        self.child_count_task = None;
+    }
+
+    fn replace_visible_order(&mut self, visible: Vec<usize>) {
+        if self.visible != visible {
+            let anchor = self.scroll_anchor();
+            self.visible = visible;
+            if let Some(anchor) = anchor {
+                self.restore_scroll(&anchor);
+            }
+        }
     }
 
     fn scroll_anchor(&self) -> Option<ScrollAnchor> {
@@ -346,6 +356,10 @@ impl Browser {
             query: String::new(),
             show_hidden,
             visible: Vec::new(),
+            sort: FileSort::default(),
+            child_counts: HashMap::new(),
+            child_count_scope: None,
+            child_count_task: None,
             selection: Selection::default(),
             reveal_path: None,
             reveal_row: None,
@@ -368,6 +382,135 @@ impl Browser {
 }
 
 impl App {
+    pub(super) fn sort_directory(&mut self, sort: FileSort, cx: &mut Context<Self>) {
+        self.panes[self.pane_target].browser.sort = sort;
+        self.filter_directory(false, true, cx);
+    }
+
+    pub(super) fn update_child_count_scope(
+        &mut self,
+        rows: Range<usize>,
+        size_visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = &mut self.panes[self.pane_target];
+        let pane_id = pane.id;
+        let browser = &mut pane.browser;
+        let scope = if browser.filtering || browser.visible.is_empty() {
+            None
+        } else if browser.sort.by_size() {
+            Some(ChildCountScope::Sorted)
+        } else if size_visible && rows.start < rows.end {
+            Some(ChildCountScope::Visible(
+                rows.start..rows.end.min(browser.visible.len()),
+            ))
+        } else {
+            None
+        };
+        if browser.child_count_scope == scope {
+            return;
+        }
+        browser.stop_child_counts();
+        let (Some(scope), DirectoryState::Ready(snapshot)) = (scope, &browser.state) else {
+            return;
+        };
+        let rows = match &scope {
+            ChildCountScope::Visible(rows) => rows.clone(),
+            ChildCountScope::Sorted => 0..browser.visible.len(),
+        };
+        let targets: Vec<_> = browser
+            .visible
+            .get(rows)
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .filter(|&index| snapshot.directory.entries[index].kind == EntryKind::Directory)
+            .collect();
+        let sorted = matches!(scope, ChildCountScope::Sorted);
+        browser.child_count_scope = Some(scope);
+        if targets.is_empty() {
+            return;
+        }
+
+        let snapshot = snapshot.clone();
+        let revision = browser.snapshot_revision;
+        let sort = browser.sort;
+        let visible = sorted.then(|| browser.visible.clone());
+        let counts = targets
+            .iter()
+            .filter_map(|index| {
+                browser
+                    .child_counts
+                    .get(index)
+                    .map(|count| (*index, *count))
+            })
+            .collect();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
+        let executor = cx.background_executor().clone();
+        let task = cx.spawn(async move |this, cx| {
+            let setup_cancelled = task_cancelled.clone();
+            let mut monitor = executor
+                .spawn(async move {
+                    ChildCountMonitor::new(
+                        snapshot,
+                        targets,
+                        counts,
+                        visible,
+                        sort,
+                        &setup_cancelled,
+                    )
+                })
+                .await;
+            while !task_cancelled.load(Relaxed) {
+                let worker_cancelled = task_cancelled.clone();
+                let (next_monitor, update) = executor
+                    .spawn(async move {
+                        let update = monitor.refresh(&worker_cancelled);
+                        (monitor, update)
+                    })
+                    .await;
+                monitor = next_monitor;
+                let daemon::browse::ChildCountUpdate { changed, reordered } = update;
+                if task_cancelled.load(Relaxed) {
+                    break;
+                }
+                if !changed.is_empty() {
+                    let applied = this
+                        .update(cx, |this, cx| {
+                            this.with_pane(pane_id, |this| {
+                                let browser = &mut this.panes[this.pane_target].browser;
+                                // 滚动、筛选或切换目录后，旧任务不能覆盖新范围。
+                                if task_cancelled.load(Relaxed)
+                                    || browser.snapshot_revision != revision
+                                {
+                                    return false;
+                                }
+                                browser.child_counts.extend(changed);
+                                if let Some(visible) = reordered {
+                                    browser.replace_visible_order(visible);
+                                }
+                                cx.notify();
+                                true
+                            })
+                            .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if !applied {
+                        break;
+                    }
+                }
+                if !monitor.wait_for_change().await {
+                    break;
+                }
+            }
+        });
+        browser.child_count_task = Some(ReadTask {
+            cancelled,
+            _task: task,
+        });
+    }
+
     pub(super) fn refresh_selected_size(&mut self, cx: &mut Context<Self>) {
         let pane = &mut self.panes[self.pane_target];
         let browser = &mut pane.browser;
@@ -434,6 +577,8 @@ impl App {
             });
         let browser = &mut self.panes[self.pane_target].browser;
         browser.snapshot_revision += 1;
+        browser.stop_child_counts();
+        browser.child_counts.clear();
         browser.read_task = None;
         browser.directory_watch = None;
         browser.refresh_pending = false;
@@ -561,22 +706,24 @@ impl App {
         let cancelled = Arc::new(AtomicBool::new(false));
         let read_cancelled = cancelled.clone();
         let query = browser.query.clone();
+        let sort = browser.sort;
         let show_hidden = browser.show_hidden;
         let read = cx.background_spawn(async move {
             let is_cancelled = || read_cancelled.load(Relaxed);
-            let directory = match source {
-                ReadSource::Directory(path) => read_directory(&path, is_cancelled)?,
-                ReadSource::Tag(paths) => read_references(paths, is_cancelled)?,
-                ReadSource::MissingTag => return Err(std::io::Error::other("标签已删除")),
-            };
-            let visible = filtered_entries(&directory, &query, show_hidden, &read_cancelled);
-            let directory = DirectorySnapshot::new(directory);
+            let directory = DirectorySnapshot::read(source, &read_cancelled)?;
+            let visible = directory.visible_entries(
+                &query,
+                show_hidden,
+                sort,
+                &HashMap::new(),
+                &read_cancelled,
+            );
             let mut thumbnails = Vec::new();
             if let Some(read_cache) = cache_reader {
                 let start = anchor_path
                     .as_ref()
                     .and_then(|path| directory.indices.get(path))
-                    .and_then(|index| visible.binary_search(index).ok())
+                    .and_then(|index| visible.iter().position(|entry| entry == index))
                     .map_or(0, |position| position.saturating_sub(8));
                 let deadline = Instant::now() + Duration::from_millis(35);
                 for &index in visible.iter().skip(start).take(48) {
@@ -607,7 +754,8 @@ impl App {
                         Ok((directory, visible, query, thumbnails)) => {
                             let filter_matches = query
                                 == this.panes[this.pane_target].browser.query
-                                && show_hidden == this.panes[this.pane_target].browser.show_hidden;
+                                && show_hidden == this.panes[this.pane_target].browser.show_hidden
+                                && sort == this.panes[this.pane_target].browser.sort;
                             if filter_matches {
                                 this.replace_snapshot(directory, visible);
                                 let revision =
@@ -628,12 +776,14 @@ impl App {
                             } else {
                                 this.panes[this.pane_target].browser.state =
                                     DirectoryState::Ready(Arc::new(directory));
-                                this.filter_directory(false, cx);
+                                this.filter_directory(false, false, cx);
                             }
                         }
                         Err(error) => {
                             let browser = &mut this.panes[this.pane_target].browser;
                             browser.snapshot_revision += 1;
+                            browser.stop_child_counts();
+                            browser.child_counts.clear();
                             browser.filter_task = None;
                             browser.filtering = false;
                             browser.visible.clear();
@@ -681,6 +831,8 @@ impl App {
         browser.filter_task = None;
         browser.filtering = false;
         browser.state = DirectoryState::Ready(Arc::new(snapshot));
+        browser.stop_child_counts();
+        browser.child_counts.clear();
         browser.visible = visible;
         browser.prune_selection(false);
         if let Some(anchor) = scroll
@@ -728,19 +880,19 @@ impl App {
     pub(super) fn search_directory(&mut self, query: String, cx: &mut Context<Self>) {
         if self.panes[self.pane_target].browser.query != query {
             self.panes[self.pane_target].browser.query = query;
-            self.filter_directory(true, cx);
+            self.filter_directory(true, false, cx);
         }
     }
 
     pub(super) fn set_show_hidden_files(&mut self, show: bool, cx: &mut Context<Self>) {
         if self.panes[self.pane_target].browser.show_hidden != show {
             self.panes[self.pane_target].browser.show_hidden = show;
-            self.filter_directory(false, cx);
+            self.filter_directory(false, false, cx);
             cx.notify();
         }
     }
 
-    fn filter_directory(&mut self, debounce: bool, cx: &mut Context<Self>) {
+    fn filter_directory(&mut self, debounce: bool, preserve_scroll: bool, cx: &mut Context<Self>) {
         let pane_id = self.panes[self.pane_target].id;
         let browser = &mut self.panes[self.pane_target].browser;
         let DirectoryState::Ready(directory) = &browser.state else {
@@ -750,8 +902,16 @@ impl App {
         let snapshot_revision = browser.snapshot_revision;
         let query = browser.query.clone();
         let show_hidden = browser.show_hidden;
+        let sort = browser.sort;
+        let counts = if sort.by_size() {
+            browser.child_counts.clone()
+        } else {
+            HashMap::new()
+        };
+        browser.stop_child_counts();
         let cancelled = Arc::new(AtomicBool::new(false));
         let filter_cancelled = cancelled.clone();
+        let obsolete = cancelled.clone();
         let executor = cx.background_executor().clone();
         browser.filter_task = None;
         browser.filtering = true;
@@ -761,22 +921,27 @@ impl App {
             }
             let visible = executor
                 .spawn(async move {
-                    filtered_entries(&directory.directory, &query, show_hidden, &filter_cancelled)
+                    directory.visible_entries(&query, show_hidden, sort, &counts, &filter_cancelled)
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.with_pane(pane_id, |this| {
-                    if this.panes[this.pane_target].browser.snapshot_revision == snapshot_revision {
-                        this.panes[this.pane_target].browser.visible = visible;
-                        this.panes[this.pane_target].browser.prune_selection(false);
-                        this.panes[this.pane_target].browser.filtering = false;
-                        this.panes[this.pane_target].browser.scroll =
-                            UniformListScrollHandle::new();
-                        this.panes[this.pane_target].browser.reset_grid_scroll();
-                        this.panes[this.pane_target].browser.restore_row = None;
-                        this.restore_snapshot_position();
-                        cx.notify();
+                    let browser = &mut this.panes[this.pane_target].browser;
+                    if obsolete.load(Relaxed) || browser.snapshot_revision != snapshot_revision {
+                        return;
                     }
+                    if preserve_scroll {
+                        browser.replace_visible_order(visible);
+                    } else {
+                        browser.visible = visible;
+                        browser.scroll = UniformListScrollHandle::new();
+                        browser.reset_grid_scroll();
+                        browser.restore_row = None;
+                    }
+                    browser.prune_selection(false);
+                    browser.filtering = false;
+                    this.restore_snapshot_position();
+                    cx.notify();
                 });
             });
         });
@@ -881,30 +1046,11 @@ impl App {
     }
 }
 
-fn filtered_entries(
-    directory: &Directory,
-    query: &str,
-    show_hidden: bool,
-    cancelled: &AtomicBool,
-) -> Vec<usize> {
-    directory
-        .entries
-        .iter()
-        .enumerate()
-        .take_while(|_| !cancelled.load(Relaxed))
-        .filter(|(_, entry)| {
-            (show_hidden || !entry.is_hidden())
-                && (query.is_empty() || entry.name.to_string_lossy().to_lowercase().contains(query))
-        })
-        .map(|(index, _)| index)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use gpui_kit::Modifiers;
 
-    use super::{AtomicBool, Browser, Relaxed, filtered_entries};
+    use super::Browser;
     use vfs::{Directory, Entry, EntryKind};
 
     fn browser_with_entries() -> Browser {
@@ -914,6 +1060,11 @@ mod tests {
                 name: index.to_string().into(),
                 path: format!("/{index}").into(),
                 kind: EntryKind::File,
+                size: None,
+                modified: None,
+                created: None,
+                accessed: None,
+                access: None,
             })
             .collect();
         browser.state = super::DirectoryState::Ready(
@@ -932,6 +1083,25 @@ mod tests {
             .selected_entries()
             .map(|entry| entry.name.to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn range_selection_follows_reordered_rows() {
+        let mut browser = browser_with_entries();
+        browser.visible = vec![5, 0, 8, 2];
+        browser.select_entry(5, Modifiers::default());
+        browser.select_entry(
+            8,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        assert_eq!(selected_names(&browser), ["0", "5", "8"]);
+        assert_eq!(
+            browser.visible_position(std::path::Path::new("/0")),
+            Some(1)
+        );
     }
 
     #[test]
@@ -1011,6 +1181,11 @@ mod tests {
                 name: name.into(),
                 path: format!("/{name}").into(),
                 kind: EntryKind::File,
+                size: None,
+                modified: None,
+                created: None,
+                accessed: None,
+                access: None,
             })
             .collect();
         browser.state = super::DirectoryState::Ready(
@@ -1041,35 +1216,5 @@ mod tests {
             position: 0,
         });
         assert_eq!(browser.restore_row, Some(2));
-    }
-
-    #[test]
-    fn filters_by_name_and_visibility_without_reordering() {
-        let directory = Directory {
-            entries: ["照片", ".Photo.jpg", "Photo 1.png", "photo 2.png"]
-                .into_iter()
-                .map(|name| Entry {
-                    name: name.into(),
-                    path: name.into(),
-                    kind: EntryKind::File,
-                })
-                .collect(),
-            read_errors: 0,
-        };
-        let cancelled = AtomicBool::new(false);
-        assert_eq!(
-            filtered_entries(&directory, "", false, &cancelled),
-            [0, 2, 3]
-        );
-        assert_eq!(
-            filtered_entries(&directory, "photo", false, &cancelled),
-            [2, 3]
-        );
-        assert_eq!(
-            filtered_entries(&directory, "photo", true, &cancelled),
-            [1, 2, 3]
-        );
-        cancelled.store(true, Relaxed);
-        assert!(filtered_entries(&directory, "", true, &cancelled).is_empty());
     }
 }

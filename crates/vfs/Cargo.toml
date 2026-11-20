@@ -7,3 +7,6 @@ edition = "2024"
 async-channel = "2.5"
 notify = "8.2"
 tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", default-features = false, features = ["user"] }

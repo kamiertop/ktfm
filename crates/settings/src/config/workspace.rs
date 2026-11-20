@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use super::{APP_NAME, AppConfig, bookmark::Bookmarks, tab::Session};
+use super::{
+    APP_NAME, AppConfig, bookmark::Bookmarks, file_columns::FileListColumns, tab::Session,
+};
 use crate::{Error, Result};
 
 const FILE_NAME: &str = "workspace.toml";
@@ -17,6 +19,7 @@ pub struct Workspace {
     #[serde(alias = "stars")]
     pub bookmarks: Bookmarks,
     pub session: Session,
+    pub file_list_columns: FileListColumns,
     /// 上次记住的窗口大小，下次启动时恢复
     pub window_size: Option<WindowSize>,
 }

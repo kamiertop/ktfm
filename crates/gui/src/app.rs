@@ -8,6 +8,7 @@ mod file_area;
 mod file_icon;
 mod file_item_actions;
 mod file_operations;
+mod file_table;
 mod io_queue;
 mod keymap;
 mod menu;

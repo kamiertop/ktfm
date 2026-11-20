@@ -16,7 +16,7 @@ use settings::config::{
     terminal::{
         DEFAULT_FONT_SIZE, FONT_SIZE_RANGE, TerminalConfig, TerminalCursorShape, TerminalMode,
     },
-    view::ViewMode,
+    view::{FileDateFormat, ViewMode},
 };
 
 use super::App;
@@ -126,6 +126,9 @@ impl PreferenceValues {
         }
         if self.view.remember_tab_state != baseline.view.remember_tab_state {
             config.view.remember_tab_state = self.view.remember_tab_state;
+        }
+        if self.view.file_date_format != baseline.view.file_date_format {
+            config.view.file_date_format = self.view.file_date_format;
         }
         if self.blank_double_click != baseline.blank_double_click {
             config.actions.blank_double_click = self.blank_double_click;
@@ -609,6 +612,33 @@ impl Preferences {
                 |view, checked| view.remember_tab_state = checked,
                 cx,
             ))
+            .child(preference_row(
+                "日期和时间格式",
+                preference_segments(
+                    cx,
+                    [
+                        (FileDateFormat::Simple, "简单"),
+                        (FileDateFormat::Detailed, "详细"),
+                    ]
+                    .into_iter()
+                    .map(|(format, label)| {
+                        preference_choice(
+                            label,
+                            label,
+                            self.draft.view.file_date_format == format,
+                            cx,
+                        )
+                        .disabled(self.busy())
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.change(window, cx, |draft| {
+                                    draft.view.file_date_format = format
+                                });
+                            },
+                        ))
+                    }),
+                ),
+            ))
     }
 
     fn view_switch(
@@ -869,6 +899,7 @@ impl Render for Preferences {
         let radius = if square { px(0.) } else { WINDOW_RADIUS };
         let theme = cx.theme();
         let palette = preferences_palette(theme.mode);
+        let font_family = theme.font_family.clone();
         let (foreground, danger) = (theme.foreground, theme.danger);
         let (title, _) = self.page.appearance();
         let content = match self.page {
@@ -881,6 +912,7 @@ impl Render for Preferences {
 
         v_flex()
             .id("preferences-window")
+            .font_family(font_family)
             .relative()
             .size_full()
             .rounded(radius)

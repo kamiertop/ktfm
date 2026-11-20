@@ -153,6 +153,11 @@ impl App {
                 Some(format!("无法加载工作区：{error}")),
             ),
         };
+        if persist_session {
+            cx.set_global(super::file_table::FileColumnPreferences(
+                workspace.file_list_columns.clone().normalize(),
+            ));
+        }
         let tag_state = cx.global::<SharedTags>().0.clone();
         let (tabs, active_tab, bookmarks) = if let Some((path, bookmarks)) = target {
             (
@@ -219,6 +224,8 @@ impl App {
             default_favorites: default_favorites(home),
             preferences: None,
         };
+        cx.observe_global::<super::file_table::FileColumnPreferences>(|_, cx| cx.notify())
+            .detach();
         cx.observe_global::<ActivePreferences>(|this, cx| {
             if !cx.global::<ActivePreferences>().0.view.remember_tab_state {
                 this.clear_saved_tab_states();
@@ -272,6 +279,7 @@ impl Render for App {
         let pending_cut = cx.global::<FileClipboard>().can_cancel_cut();
         v_flex()
             .id("file-manager")
+            .font_family(cx.theme().font_family.clone())
             .key_context(if pending_cut {
                 "FileManager PendingFileCut"
             } else {

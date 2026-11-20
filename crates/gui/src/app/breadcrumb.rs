@@ -160,6 +160,10 @@ impl App {
             )
             .child(self.copy_path_button(copy_path, cx))
             .child(self.hidden_files_button(cx))
+            .when(
+                self.pane().view_mode == settings::config::view::ViewMode::List,
+                |bar| bar.child(div().flex_shrink_0().child(self.file_columns_button())),
+            )
             .child(self.view_switch_button(cx))
     }
 }

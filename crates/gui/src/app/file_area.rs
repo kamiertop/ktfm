@@ -1,4 +1,3 @@
-use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -7,7 +6,7 @@ use gpui_kit::assets::IconName;
 
 use gpui_kit::base::{Disableable as _, Selectable as _};
 use gpui_kit::component::menu::ContextMenuExt;
-use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -28,15 +27,6 @@ use crate::components::{icon_button, truncated_text, with_anchored_tooltip};
 use crate::model::entry_appearance;
 use crate::style::file_selection_color;
 
-// 列表视口的边距独立于缩放。右侧依次为背景点击区和滚动条轨道。
-const LIST_LEFT_PADDING: Pixels = px(16.);
-const LIST_BOTTOM_PADDING: Pixels = px(16.);
-// 列表右侧的背景点击区宽度
-const LIST_BACKGROUND_CLICK_WIDTH: Pixels = px(24.);
-const LIST_SCROLLBAR_WIDTH: Pixels = px(12.);
-// 行内字段的留白与行外的背景点击区独立。
-const LIST_ROW_FIELD_PADDING: Pixels = px(12.);
-
 // 网格列宽按窗格宽度计算，背景点击使用卡片之间的空隙。
 const GRID_MARGIN: Pixels = px(18.);
 // 网格之间的距离
@@ -45,11 +35,11 @@ const GRID_ICON_SIDE_SPACE: Pixels = px(18.);
 const GRID_CARD_PADDING: Pixels = px(6.);
 const GRID_CARD_RADIUS: Pixels = px(12.);
 const GRID_LABEL_GAP: Pixels = px(6.);
-const PENDING_CUT_OPACITY: f32 = 0.5;
+pub(super) const PENDING_CUT_OPACITY: f32 = 0.5;
 const ZOOM_SCROLL_STEP: Pixels = px(48.);
 const ZOOM_SCROLL_INTERVAL: Duration = Duration::from_millis(100);
 
-fn format_size(bytes: u64) -> String {
+pub(super) fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
     }
@@ -129,7 +119,13 @@ impl App {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if self.focus.is_focused(window) && self.pane_changes_allowed() {
+        let pane = self.pane();
+        let list_focused = pane.view_mode == ViewMode::List
+            && pane
+                .file_table
+                .as_ref()
+                .is_some_and(|table| table.read(cx).focus_handle(cx).contains_focused(window, cx));
+        if (self.focus.is_focused(window) || list_focused) && self.pane_changes_allowed() {
             cx.stop_propagation();
             self.zoom_file_view(steps, cx);
         }
@@ -177,7 +173,6 @@ impl App {
         let browser = &pane.browser;
         let count = browser.visible.len();
         let layout = FileLayout::new(pane.view_mode, pane.zoom_step, width);
-        let show_list_scrollbar = !window.is_inspector_picking(cx);
         let selected = browser.selection_len();
         let selection_details = browser.single_selected_entry().map(|entry| {
             let size = match browser.selected_size() {
@@ -233,6 +228,7 @@ impl App {
 
         let browser = &mut self.panes[self.pane_target].browser;
         if layout.grid {
+            browser.stop_child_counts();
             browser.prepare_grid_scroll(layout.columns, layout.tile_width, layout.icon_size);
             if let Some(position) = browser.restore_row.take() {
                 browser.grid_scroll.scroll_to(ListOffset {
@@ -262,6 +258,9 @@ impl App {
                 browser.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
             }
         }
+        let mut message = message;
+        let file_table = (!layout.grid)
+            .then(|| self.file_list_table(width, layout.icon_size, message.take(), window, cx));
         let owner = cx.weak_entity();
         let zoom_owner = owner.clone();
         let status_error = self.panes[self.pane_target]
@@ -294,6 +293,32 @@ impl App {
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
+                    .child(
+                        canvas(
+                            |bounds, window, _| {
+                                window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                            },
+                            move |_, hitbox, window, _| {
+                                // 在列表处理滚动前拦截缩放手势。
+                                window.on_mouse_event(
+                                    move |event: &ScrollEvent, phase, window, cx| {
+                                        if phase == DispatchPhase::Capture
+                                            && event.control
+                                            && hitbox.should_handle_scroll(window)
+                                        {
+                                            let _ = zoom_owner.update(cx, |app, cx| {
+                                                app.with_pane(pane_id, |app| {
+                                                    app.scroll_file_zoom(event, cx)
+                                                });
+                                            });
+                                        }
+                                    },
+                                );
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                     .when_some(message, |content, message| {
                         content.child(
                             v_flex()
@@ -324,67 +349,7 @@ impl App {
                             )
                             .vertical_scrollbar(scroll)
                     })
-                    .when(count > 0 && !layout.grid, |content| {
-                        content
-                            .child(
-                                uniform_list(
-                                    "file-list",
-                                    count,
-                                    cx.processor(move |this, rows: Range<usize>, window, cx| {
-                                        this.with_pane(pane_id, |this| {
-                                            rows.map(|row| this.file_row(row, layout, window, cx))
-                                                .collect()
-                                        })
-                                        .unwrap_or_default()
-                                    }),
-                                )
-                                .track_scroll(&self.panes[self.pane_target].browser.scroll)
-                                .size_full()
-                                .pl(LIST_LEFT_PADDING)
-                                .pr(LIST_BACKGROUND_CLICK_WIDTH + LIST_SCROLLBAR_WIDTH)
-                                .pb(LIST_BOTTOM_PADDING),
-                            )
-                            .when(show_list_scrollbar, |content| {
-                                content.child(
-                                    div().absolute().inset_0().child(
-                                        Scrollbar::vertical(
-                                            &self.panes[self.pane_target].browser.scroll,
-                                        )
-                                        .id("file-list-scrollbar")
-                                        .viewport_from_layout()
-                                        .styles(|styles| {
-                                            styles.track(|track| track.width(LIST_SCROLLBAR_WIDTH))
-                                        }),
-                                    ),
-                                )
-                            })
-                    })
-                    .child(
-                        canvas(
-                            |bounds, window, _| {
-                                window.insert_hitbox(bounds, HitboxBehavior::Normal)
-                            },
-                            move |_, hitbox, window, _| {
-                                // 在列表处理滚动前拦截缩放手势。
-                                window.on_mouse_event(
-                                    move |event: &ScrollEvent, phase, window, cx| {
-                                        if phase == DispatchPhase::Capture
-                                            && event.control
-                                            && hitbox.should_handle_scroll(window)
-                                        {
-                                            let _ = zoom_owner.update(cx, |app, cx| {
-                                                app.with_pane(pane_id, |app| {
-                                                    app.scroll_file_zoom(event, cx)
-                                                });
-                                            });
-                                        }
-                                    },
-                                );
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
+                    .children(file_table)
                     .map(|area| {
                         if self.location().is_none() && count == 0 {
                             return area.into_any_element();
@@ -567,6 +532,7 @@ impl App {
         let pane = &mut self.panes[self.pane_target];
         if pane.view_mode != mode {
             pane.view_mode = mode;
+            pane.browser.stop_child_counts();
             pane.zoom_step = clamp_zoom_step(mode, pane.zoom_step);
             pane.browser.scroll = UniformListScrollHandle::new();
             pane.browser.reset_grid_scroll();
@@ -586,24 +552,20 @@ impl App {
         h_flex()
             .id(("file-row", row))
             .w_full()
-            .when(layout.grid, |row| {
-                row.items_start().gap(GRID_GAP).pb(GRID_GAP)
-            })
-            .when(!layout.grid, |row| row.h(layout.row_height()))
+            .items_start()
+            .gap(GRID_GAP)
+            .pb(GRID_GAP)
             .children((start..end).filter_map(|position| {
                 let index = self.panes[self.pane_target].browser.visible[position];
                 let entry = self.file_entry(index, layout, window, cx)?;
-                Some(if layout.grid {
-                    // 等宽列槽铺满视口，卡片居中；两侧空白由文件区处理点击。
+                // 等宽列槽铺满视口，卡片居中；两侧空白由文件区处理点击。
+                Some(
                     h_flex()
                         .w(layout.slot_width)
                         .flex_shrink_0()
                         .justify_center()
-                        .child(entry)
-                        .into_any_element()
-                } else {
-                    entry.into_any_element()
-                })
+                        .child(entry),
+                )
             }))
     }
 
@@ -619,7 +581,6 @@ impl App {
         };
         let file = directory.directory.entries.get(index)?;
         let FileLayout {
-            grid,
             tile_width,
             icon_size,
             ..
@@ -634,12 +595,12 @@ impl App {
         let pane_id = self.panes[self.pane_target].id;
         let snapshot_revision = self.panes[self.pane_target].browser.snapshot_revision;
         let name = SharedString::from(file.name.to_string_lossy().into_owned());
-        let (icon, kind, previewable) = entry_appearance(file.kind, &file.path);
+        let (icon, _, previewable) = entry_appearance(file.kind, &file.path);
         let cut_paths = cx.global::<FileClipboard>().pending_cut_paths();
         let pending_cut = cut_paths.contains(&file.path);
         let folder_drag =
             (file.kind == EntryKind::Directory).then(|| BookmarkDrag::Folder(file.path.clone()));
-        let thumbnail = if grid && previewable {
+        let thumbnail = if previewable {
             let device_size = (f32::from(icon_size) * window.scale_factor()).ceil() as u16;
             self.thumbnails.get_or_request(
                 (pane_id, snapshot_revision, index),
@@ -671,17 +632,12 @@ impl App {
                 .items_center()
                 .rounded_md()
                 .text_base()
-                .when(grid, |tile| {
-                    tile.flex_col()
-                        .gap(GRID_LABEL_GAP)
-                        .p(GRID_CARD_PADDING)
-                        .rounded(GRID_CARD_RADIUS)
-                        .w(tile_width)
-                        .flex_shrink_0()
-                })
-                .when(!grid, |entry| {
-                    entry.gap_2().px(LIST_ROW_FIELD_PADDING).h(layout.row_height() - px(4.)).w_full().min_w_0()
-                })
+                .flex_col()
+                .gap(GRID_LABEL_GAP)
+                .p(GRID_CARD_PADDING)
+                .rounded(GRID_CARD_RADIUS)
+                .w(tile_width)
+                .flex_shrink_0()
                 .when_some(folder_drag, |entry, folder| {
                     entry.on_drag(folder, BookmarkDrag::preview)
                 })
@@ -724,52 +680,37 @@ impl App {
                         .min_w_0()
                         .flex_shrink_0()
                         .opacity(content_opacity)
-                        .when(grid, |slot| slot.w_full().h(icon_size))
+                        .w_full().h(icon_size)
                         .child(preview)
                 })
                 .child(
                     v_flex()
                         .min_w_0()
                         .max_w_full()
-                        .when(grid, |label| label.w_full())
-                        .when(!grid, |label| label.flex_1())
+                        .w_full()
                         .opacity(content_opacity)
                         .child(
                             div()
-                                .when(grid, |label| {
-                                    label.text_center()
-                                        .text_sm()
-                                        .line_height(px(18.))
-                                        .whitespace_normal()
-                                        .line_clamp(3)
-                                        .text_ellipsis()
-                                })
-                                .when(!grid, |label| label.truncate())
+                                .text_center()
+                                .text_sm()
+                                .line_height(px(18.))
+                                .whitespace_normal()
+                                .line_clamp(3)
+                                .text_ellipsis()
                                 .child(truncated_text(name.clone(), name)),
                         )
                         .when_some(source, |name, source| {
                             name.child(
                                 div()
                                     .truncate()
-                                    .when(grid, |label| {
-                                        label.text_center().line_height(px(14.))
-                                    })
+                                    .text_center()
+                                    .line_height(px(14.))
                                     .text_xs()
                                     .text_color(detail_color)
                                     .child(source),
                             )
                         }),
                 )
-                .when(!grid, |row| {
-                    row.child(
-                        div()
-                            .max_w(relative(0.4))
-                            .truncate()
-                            .text_sm()
-                            .text_color(detail_color.opacity(content_opacity))
-                            .child(kind),
-                    )
-                })
                 .context_menu(move |menu, window, cx| {
                     Self::build_file_item_menu(pane_id, snapshot_revision, index, menu, &owner, window, cx)
                 }),

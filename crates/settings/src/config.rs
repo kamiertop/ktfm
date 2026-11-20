@@ -1,5 +1,6 @@
 pub mod action;
 pub mod bookmark;
+pub mod file_columns;
 mod font;
 pub mod general;
 pub mod operations;

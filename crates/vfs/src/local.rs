@@ -2,6 +2,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use crate::access::{AccessReader, EntryAccess};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
@@ -17,6 +20,11 @@ pub struct Entry {
     pub name: OsString,
     pub path: PathBuf,
     pub kind: EntryKind,
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+    pub created: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    pub access: Option<EntryAccess>,
 }
 
 impl Entry {
@@ -47,23 +55,41 @@ pub fn read_directory(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<D
         read_errors: 0,
     };
 
+    let mut access = AccessReader::default();
     for item in fs::read_dir(path)? {
         check_cancelled()?;
         let Ok(item) = item else {
             directory.read_errors += 1;
             continue;
         };
-        let kind = match item.file_type() {
-            Ok(kind) => entry_kind(kind),
-            Err(_) => {
-                directory.read_errors += 1;
-                continue;
-            }
+        let metadata = item.metadata().ok();
+        let kind = match &metadata {
+            Some(metadata) => entry_kind(metadata.file_type()),
+            None => match item.file_type() {
+                Ok(kind) => entry_kind(kind),
+                Err(_) => {
+                    directory.read_errors += 1;
+                    continue;
+                }
+            },
         };
+        let path = item.path();
         directory.entries.push(Entry {
             name: item.file_name(),
-            path: item.path(),
+            path,
             kind,
+            size: metadata
+                .as_ref()
+                .filter(|metadata| metadata.is_file())
+                .map(fs::Metadata::len),
+            modified: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            created: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.created().ok()),
+            access: metadata.as_ref().and_then(|metadata| access.read(metadata)),
+            accessed: metadata.and_then(|metadata| metadata.accessed().ok()),
         });
     }
 
@@ -80,19 +106,37 @@ pub fn read_directory(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<D
 pub fn read_references(paths: Vec<PathBuf>, cancelled: impl Fn() -> bool) -> io::Result<Directory> {
     let mut entries = Vec::with_capacity(paths.len());
     let mut read_errors = 0;
+    let mut access = AccessReader::default();
     for path in paths {
         if cancelled() {
             return Err(io::ErrorKind::Interrupted.into());
         }
-        let kind = match fs::symlink_metadata(&path) {
-            Ok(metadata) => entry_kind(metadata.file_type()),
-            Err(_) => {
+        let metadata = fs::symlink_metadata(&path).ok();
+        let kind = metadata.as_ref().map_or_else(
+            || {
                 read_errors += 1;
                 EntryKind::Missing
-            }
-        };
+            },
+            |metadata| entry_kind(metadata.file_type()),
+        );
         let name = path.file_name().unwrap_or(path.as_os_str()).to_os_string();
-        entries.push(Entry { name, path, kind });
+        entries.push(Entry {
+            name,
+            path,
+            kind,
+            size: metadata
+                .as_ref()
+                .filter(|metadata| metadata.is_file())
+                .map(fs::Metadata::len),
+            modified: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
+            created: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.created().ok()),
+            access: metadata.as_ref().and_then(|metadata| access.read(metadata)),
+            accessed: metadata.and_then(|metadata| metadata.accessed().ok()),
+        });
     }
     entries.sort_unstable_by(|a, b| {
         (a.kind != EntryKind::Directory, &a.name, &a.path).cmp(&(
@@ -105,6 +149,27 @@ pub fn read_references(paths: Vec<PathBuf>, cancelled: impl Fn() -> bool) -> io:
         entries,
         read_errors,
     })
+}
+
+/// 只统计目录的直接项目；无法完整读取时返回 None。
+pub fn read_child_count(path: &Path, cancelled: impl Fn() -> bool) -> io::Result<Option<u64>> {
+    if cancelled() {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    let Ok(children) = fs::read_dir(path) else {
+        return Ok(None);
+    };
+    let mut count = 0;
+    for child in children {
+        if cancelled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        if child.is_err() {
+            return Ok(None);
+        }
+        count += 1;
+    }
+    Ok(Some(count))
 }
 
 fn entry_kind(kind: fs::FileType) -> EntryKind {
@@ -186,6 +251,7 @@ mod tests {
         fs::create_dir(&path)?;
         let result = (|| {
             fs::create_dir(path.join("z-folder"))?;
+            fs::create_dir_all(path.join("z-folder/subfolder/deeper"))?;
             fs::write(path.join("z-folder/nested"), "123")?;
             fs::write(path.join("b.txt"), "12")?;
             fs::write(path.join(".a.txt"), "")?;
@@ -202,6 +268,10 @@ mod tests {
             assert_eq!(directory.read_errors, 0);
             assert_eq!(directory.entries[0].kind, EntryKind::Directory);
             assert_eq!(directory.entries[0].name, "z-folder");
+            assert_eq!(
+                read_child_count(&directory.entries[0].path, || false)?,
+                Some(2)
+            );
             assert_eq!(directory.entries[1].name, ".a.txt");
             assert!(directory.entries[1].is_hidden());
             assert_eq!(directory.entries[2].name, "b.txt");

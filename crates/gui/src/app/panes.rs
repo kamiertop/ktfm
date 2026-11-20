@@ -15,6 +15,7 @@ use uuid::Uuid;
 use super::App;
 use super::browser::Browser;
 use super::embed_terminal::TerminalResize;
+use super::file_table::FileTable;
 use super::preferences::ActivePreferences;
 use super::tabs::{BrowserTab, restore_tab_items};
 use super::tags::TagChange;
@@ -57,6 +58,7 @@ pub(super) struct BrowserPane {
     pub(super) navigation_revision: u64,
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
+    pub(super) file_table: Option<Entity<FileTable>>,
     pub(super) view_mode: ViewMode,
     pub(super) zoom_step: i8,
     pub(super) zoom_scroll: Option<(std::time::Instant, f32)>,
@@ -93,6 +95,7 @@ impl BrowserPane {
             navigation_revision: 0,
             search,
             browser: Browser::new(show_hidden),
+            file_table: None,
             view_mode,
             zoom_step: 0,
             zoom_scroll: None,

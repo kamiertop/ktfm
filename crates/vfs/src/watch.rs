@@ -12,13 +12,7 @@ pub struct DirectoryWatch {
 
 impl DirectoryWatch {
     pub fn new(path: &Path) -> notify::Result<Self> {
-        Self::watch(path, |event| {
-            !matches!(
-                event.kind,
-                EventKind::Access(_)
-                    | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_))
-            )
-        })
+        Self::watch(path, entry_change)
     }
 
     /// 监听父目录中的目标文件，兼容通过 rename 替换目标文件。
@@ -33,12 +27,35 @@ impl DirectoryWatch {
         })
     }
 
+    /// 单个监听器监听多个目录的下一层。注册失败时由调用方回退到轮询。
+    pub fn for_directories<'a>(paths: impl IntoIterator<Item = &'a Path>) -> notify::Result<Self> {
+        let (mut watcher, changes) = Self::listener(entry_change)?;
+        for path in paths {
+            watcher.watch(path, RecursiveMode::NonRecursive)?;
+        }
+        Ok(Self {
+            _watcher: watcher,
+            changes,
+        })
+    }
+
     fn watch(
         path: &Path,
         relevant: impl Fn(&Event) -> bool + Send + 'static,
     ) -> notify::Result<Self> {
+        let (mut watcher, changes) = Self::listener(relevant)?;
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
+        Ok(Self {
+            _watcher: watcher,
+            changes,
+        })
+    }
+
+    fn listener(
+        relevant: impl Fn(&Event) -> bool + Send + 'static,
+    ) -> notify::Result<(RecommendedWatcher, Receiver<()>)> {
         let (sender, changes) = async_channel::bounded(1);
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+        let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
             let refresh = match event {
                 Ok(event) => event.need_rescan() || relevant(&event),
                 Err(error) => {
@@ -51,11 +68,7 @@ impl DirectoryWatch {
                 let _ = sender.try_send(());
             }
         })?;
-        watcher.watch(path, RecursiveMode::NonRecursive)?;
-        Ok(Self {
-            _watcher: watcher,
-            changes,
-        })
+        Ok((watcher, changes))
     }
 
     pub async fn changed(&self) -> bool {
@@ -67,6 +80,13 @@ impl DirectoryWatch {
             Ok(()) | Err(TryRecvError::Empty | TryRecvError::Closed) => {}
         }
     }
+}
+
+fn entry_change(event: &Event) -> bool {
+    !matches!(
+        event.kind,
+        EventKind::Access(_) | EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_))
+    )
 }
 
 #[cfg(test)]
@@ -89,6 +109,25 @@ mod tests {
             wait_for_change(&watch)
         })();
         fs::remove_dir_all(path)?;
+        result
+    }
+
+    #[test]
+    fn detects_changes_in_the_second_watched_directory() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "ktfm-test-directory-watch-batch-{}",
+            std::process::id()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first)?;
+        fs::create_dir(&second)?;
+        let result = (|| {
+            let watch = DirectoryWatch::for_directories([first.as_path(), second.as_path()])?;
+            fs::write(second.join("new-file"), "")?;
+            wait_for_change(&watch)
+        })();
+        fs::remove_dir_all(root)?;
         result
     }
 

@@ -27,32 +27,51 @@ struct Palette {
     sidebar: &'static str,
     selection: &'static str,
     hover: &'static str,
+    table_header: &'static str,
+    table_column_divider: &'static str,
 }
 
 const LIGHT: Palette = Palette {
     sidebar: "#edf3fa",
     selection: "#d4e6fc",
     hover: "#dce7f4",
+    table_header: "#f3f6fa",
+    table_column_divider: "#d6dee8",
 };
 
 const DARK: Palette = Palette {
     sidebar: "#1b2534",
     selection: "#2b4567",
     hover: "#30435d",
+    table_header: "#202936",
+    table_column_divider: "#3c4a5c",
 };
 
 pub fn install_themes(cx: &mut App) {
     let mode = cx.theme().mode;
+    // 保留组件初始化时解析出的真实字体，切换主题时沿用它。
+    let resolved_font = cx.theme().font_family.clone();
     Theme::update(cx, |theme| {
         for (config, palette) in [
             (&mut theme.light_theme, LIGHT),
             (&mut theme.dark_theme, DARK),
         ] {
             let config = Rc::make_mut(config);
+            if config
+                .font_family
+                .as_deref()
+                .is_none_or(|family| family == ".SystemUIFont")
+                && resolved_font != ".SystemUIFont"
+            {
+                config.font_family = Some(resolved_font.clone());
+            }
             config.colors.sidebar = Some(palette.sidebar.into());
             config.colors.sidebar_accent = Some(palette.selection.into());
             config.colors.sidebar_accent_foreground = config.colors.sidebar_foreground.clone();
             config.colors.list_hover = Some(palette.hover.into());
+            config.colors.table_head = Some(palette.table_header.into());
+            // DataTable 的列宽手柄使用这个颜色绘制表头竖线。
+            config.colors.table_row_border = Some(palette.table_column_divider.into());
         }
     });
     Theme::change(mode, None, cx);

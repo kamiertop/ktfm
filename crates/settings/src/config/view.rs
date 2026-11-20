@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDateFormat {
+    #[default]
+    Simple,
+    Detailed,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[serde(default)]
@@ -9,6 +17,8 @@ pub struct ViewConfig {
     pub show_hidden_files: bool,
     /// 切换标签页时保留搜索、选区和滚动位置。
     pub remember_tab_state: bool,
+    /// 文件列表时间列共用的日期显示方式。
+    pub file_date_format: FileDateFormat,
 }
 
 impl Default for ViewConfig {
@@ -17,6 +27,7 @@ impl Default for ViewConfig {
             view_mode: ViewMode::default(),
             show_hidden_files: false,
             remember_tab_state: true,
+            file_date_format: FileDateFormat::default(),
         }
     }
 }
