@@ -13,9 +13,11 @@ use settings::config::{
 use uuid::Uuid;
 
 use super::App;
+use super::breadcrumb::BreadcrumbScroll;
 use super::browser::Browser;
 use super::embed_terminal::TerminalResize;
 use super::file_table::FileTable;
+use super::path_editor::PathEditor;
 use super::preferences::ActivePreferences;
 use super::tabs::{BrowserTab, restore_tab_items};
 use super::tags::TagChange;
@@ -58,6 +60,8 @@ pub(super) struct BrowserPane {
     pub(super) navigation_revision: u64,
     pub(super) search: Entity<InputState>,
     pub(super) browser: Browser,
+    pub(super) breadcrumb_scroll: BreadcrumbScroll,
+    pub(super) path_editor: Option<PathEditor>,
     pub(super) file_table: Option<Entity<FileTable>>,
     pub(super) view_mode: ViewMode,
     pub(super) zoom_step: i8,
@@ -95,6 +99,8 @@ impl BrowserPane {
             navigation_revision: 0,
             search,
             browser: Browser::new(show_hidden),
+            breadcrumb_scroll: BreadcrumbScroll::default(),
+            path_editor: None,
             file_table: None,
             view_mode,
             zoom_step: 0,
@@ -139,7 +145,7 @@ impl App {
 
     pub(super) fn pane_changes_allowed(&self) -> bool {
         self.file_name_editor.is_none()
-            && self.directory_properties.is_none()
+            && self.file_properties.is_none()
             && self.tag_editor.is_none()
             && self.bookmark_rename.is_none()
             && self.bookmark_properties.is_none()
@@ -440,7 +446,13 @@ impl App {
                     .child(rows),
             );
         }
-        area.into_any_element()
+        // 分屏组填满侧栏之后剩余的空间，避免按整窗宽度重新分配窗格。
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(area)
+            .into_any_element()
     }
 
     fn resizable_group(

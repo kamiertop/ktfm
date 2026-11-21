@@ -13,6 +13,7 @@ mod io_queue;
 mod keymap;
 mod menu;
 mod panes;
+mod path_editor;
 mod preferences;
 mod sidebar;
 mod tabs;

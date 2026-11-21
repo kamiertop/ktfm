@@ -16,6 +16,9 @@ use vfs::EntryKind;
 
 use super::{App, browser::DirectoryState};
 use crate::components::popup_surface;
+use crate::model::entry_appearance;
+
+use super::file_area::format_size;
 
 /// 文件操作命令。既是右键菜单的载荷，也是键绑定的动作：
 /// 键盘与菜单共用 [`App::file_action`] 一个分发入口。
@@ -178,10 +181,11 @@ pub(super) struct FileNameEditor {
     _enter: Subscription,
 }
 
-pub(super) struct DirectoryProperties {
+pub(super) struct FileProperties {
     path: PathBuf,
-    entries: usize,
-    read_errors: usize,
+    kind: EntryKind,
+    size: Option<u64>,
+    contents: Option<(usize, usize)>,
     focus: FocusHandle,
 }
 
@@ -249,7 +253,7 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         if self.file_name_editor.is_some()
-            || self.directory_properties.is_some()
+            || self.file_properties.is_some()
             || (self.file_job.is_some()
                 && !matches!(action, FileAction::SelectAll | FileAction::Properties))
         {
@@ -593,42 +597,79 @@ impl App {
     }
 
     fn open_directory_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(path), DirectoryState::Ready(snapshot)) =
-            (self.location(), &self.panes[self.pane_target].browser.state)
-        else {
+        let Some(path) = self.location().map(Path::to_owned) else {
             return;
         };
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        self.directory_properties = Some(DirectoryProperties {
-            path: path.to_owned(),
-            entries: snapshot.directory.entries.len(),
-            read_errors: snapshot.directory.read_errors,
-            focus,
-        });
+        let contents = match &self.pane().browser.state {
+            DirectoryState::Ready(snapshot) => Some((
+                snapshot.directory.entries.len(),
+                snapshot.directory.read_errors,
+            )),
+            _ => None,
+        };
+        self.show_file_properties(
+            FileProperties {
+                path,
+                kind: EntryKind::Directory,
+                size: None,
+                contents,
+                focus: cx.focus_handle(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn open_status_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.pane_changes_allowed() {
+            return;
+        }
+        let Some(entry) = self.pane().browser.single_selected_entry() else {
+            self.open_directory_properties(window, cx);
+            return;
+        };
+        let properties = FileProperties {
+            path: entry.path.clone(),
+            kind: entry.kind,
+            size: entry.size.filter(|_| entry.kind == EntryKind::File),
+            contents: None,
+            focus: cx.focus_handle(),
+        };
+        self.show_file_properties(properties, window, cx);
+    }
+
+    fn show_file_properties(
+        &mut self,
+        properties: FileProperties,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&properties.focus, cx);
+        self.file_properties = Some(properties);
         cx.notify();
     }
 
-    fn close_directory_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.directory_properties = None;
+    fn close_file_properties(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_properties = None;
         window.focus(&self.focus, cx);
         cx.notify();
     }
 
-    pub(super) fn directory_properties_dialog(&self, cx: &mut Context<Self>) -> Option<Dialog> {
-        let properties = self.directory_properties.as_ref()?;
+    pub(super) fn file_properties_dialog(&self, cx: &mut Context<Self>) -> Option<Dialog> {
+        let properties = self.file_properties.as_ref()?;
         let owner = cx.weak_entity();
         let name = properties
             .path
             .file_name()
             .unwrap_or(properties.path.as_os_str());
+        let (_, kind, _) = entry_appearance(properties.kind, &properties.path);
         Some(
             Dialog::new(cx)
                 .focus_handle(properties.focus.clone())
                 .on_open_change(move |open, _, window, cx| {
                     if !open {
                         let _ = owner.update(cx, |this, cx| {
-                            this.close_directory_properties(window, cx);
+                            this.close_file_properties(window, cx);
                         });
                     }
                 })
@@ -642,20 +683,29 @@ impl App {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(div().font_weight(FontWeight::SEMIBOLD).child("文件夹属性"))
+                        .child(div().font_weight(FontWeight::SEMIBOLD).child("属性"))
                         .child(
                             v_flex()
                                 .min_w_0()
                                 .gap_1()
                                 .text_sm()
                                 .child(format!("名称　{}", name.to_string_lossy()))
-                                .child("类型　文件夹")
+                                .child(format!("类型　{kind}"))
                                 .child(format!("路径　{}", properties.path.display()))
-                                .child(format!("直接包含　{} 项", properties.entries))
-                                .when(properties.read_errors > 0, |details| {
-                                    details
-                                        .child(format!("读取失败　{} 项", properties.read_errors))
-                                }),
+                                .when_some(properties.size, |details, size| {
+                                    details.child(format!("大小　{}", format_size(size)))
+                                })
+                                .when_some(
+                                    properties.contents,
+                                    |details, (entries, read_errors)| {
+                                        details.child(format!("直接包含　{entries} 项")).when(
+                                            read_errors > 0,
+                                            |details| {
+                                                details.child(format!("读取失败　{read_errors} 项"))
+                                            },
+                                        )
+                                    },
+                                ),
                         )
                         .child(
                             h_flex().justify_end().child(
@@ -663,7 +713,7 @@ impl App {
                                     .ghost()
                                     .label("关闭")
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_directory_properties(window, cx);
+                                        this.close_file_properties(window, cx);
                                     })),
                             ),
                         ),

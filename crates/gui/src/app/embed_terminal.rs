@@ -72,11 +72,13 @@ impl Render for ResizePreview {
 }
 
 impl App {
+    pub(super) fn embedded_terminal_visible(&self) -> bool {
+        let pane = self.pane();
+        pane.tabs[pane.active_tab].terminal.visible
+    }
+
     pub(super) fn toggle_embedded_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab]
-            .terminal
-            .visible
-        {
+        if self.embedded_terminal_visible() {
             self.hide_embedded_terminal(window, cx);
         } else {
             self.show_embedded_terminal(window, cx);

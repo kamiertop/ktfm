@@ -5,13 +5,16 @@ use daemon::job::JobKind;
 use gpui_kit::assets::IconName;
 
 use gpui_kit::base::{Disableable as _, Selectable as _};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::ContextMenuExt;
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::command::AppCommand;
+use settings::config::terminal::TerminalMode;
 use settings::config::view::ViewMode;
 use vfs::EntryKind;
 
@@ -20,6 +23,7 @@ use super::bookmarks::BookmarkDrag;
 use super::browser::{DirectoryState, SelectedSize};
 use super::file_icon::file_icon;
 use super::file_operations::FileClipboard;
+use super::file_table::file_columns_controls;
 use super::panes::{clamp_zoom_step, zoom_icon_size};
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
@@ -110,6 +114,21 @@ fn wheel_zoom_steps(scroll: &mut Option<(Instant, f32)>, now: Instant, delta: f3
     let steps = remainder.trunc() as i8;
     *scroll = (steps == 0).then_some((started, remainder));
     steps
+}
+
+fn next_view_mode(mode: ViewMode) -> (ViewMode, IconName, &'static str) {
+    match mode {
+        ViewMode::List => (ViewMode::Grid, IconName::Rows3, "切换到网格视图"),
+        ViewMode::Grid => (ViewMode::List, IconName::LayoutGrid, "切换到列表视图"),
+    }
+}
+
+fn hidden_files_control(show_hidden: bool) -> (IconName, &'static str) {
+    if show_hidden {
+        (IconName::Eye, "隐藏隐藏文件")
+    } else {
+        (IconName::EyeOff, "显示隐藏文件")
+    }
 }
 
 impl App {
@@ -279,7 +298,7 @@ impl App {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .child(self.path_breadcrumb(window, cx))
+            .child(self.path_breadcrumb(width, window, cx))
             .child(
                 div()
                     .id("file-area-entries")
@@ -371,68 +390,83 @@ impl App {
                     .flex_shrink_0()
                     .min_w_0()
                     .gap_2()
-                    .px_5()
-                    .py_2()
+                    .pl_2()
+                    .pr_5()
+                    .py_1()
+                    .when(width < px(190.), |bar| bar.pr_2())
+                    .when(width < px(85.), |bar| bar.px(px(1.)).gap_0p5())
                     .border_t_1()
                     .border_color(border)
                     .text_sm()
                     .text_color(muted)
                     .child(
-                        div()
+                        h_flex()
+                            .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .child(status_error.unwrap_or(status)),
-                    )
-                    .when_some(
-                        selection_details.filter(|_| !status_has_error),
-                        |bar, (size, name)| {
-                            let display_name = name.to_string_lossy().into_owned();
-                            let clipboard_name = name.into_string().ok();
-                            let label = if clipboard_name.is_some() {
-                                "复制名称"
-                            } else {
-                                "无法复制名称：文件名不是有效的 UTF-8 文本"
-                            };
-                            let name = h_flex()
-                                .id("copy-selected-name")
-                                .min_w_0()
-                                .gap_1()
-                                .px_1()
-                                .rounded_sm()
-                                .text_color(status_foreground)
-                                .when_some(clipboard_name, |name, text| {
-                                    name.role(Role::Button)
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(status_hover))
-                                        .on_click(move |_, _, cx| {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                text.clone(),
-                                            ));
-                                        })
-                                        .child(
-                                            Icon::new(IconName::Copy).size(px(12.)).flex_shrink_0(),
-                                        )
-                                })
-                                .child(div().min_w_0().truncate().child(display_name))
-                                .tooltip(move |window, cx| Tooltip::new(label).build(window, cx));
-                            bar.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .border_l_1()
-                                    .border_color(border)
-                                    .pl_2()
-                                    .child(size),
-                            )
+                            .overflow_hidden()
+                            .gap_2()
                             .child(
                                 div()
                                     .min_w_0()
-                                    .border_l_1()
-                                    .border_color(border)
-                                    .pl_2()
-                                    .child(name),
+                                    .truncate()
+                                    .child(status_error.unwrap_or(status)),
                             )
-                        },
-                    ),
+                            .when_some(
+                                selection_details.filter(|_| !status_has_error),
+                                |bar, (size, name)| {
+                                    let display_name = name.to_string_lossy().into_owned();
+                                    let clipboard_name = name.into_string().ok();
+                                    let label = if clipboard_name.is_some() {
+                                        "复制名称"
+                                    } else {
+                                        "无法复制名称：文件名不是有效的 UTF-8 文本"
+                                    };
+                                    let name = h_flex()
+                                        .id("copy-selected-name")
+                                        .min_w_0()
+                                        .gap_1()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .text_color(status_foreground)
+                                        .when_some(clipboard_name, |name, text| {
+                                            name.role(Role::Button)
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(status_hover))
+                                                .on_click(move |_, _, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(text.clone()),
+                                                    );
+                                                })
+                                                .child(
+                                                    Icon::new(IconName::Copy)
+                                                        .size(px(12.))
+                                                        .flex_shrink_0(),
+                                                )
+                                        })
+                                        .child(div().min_w_0().truncate().child(display_name))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(label).build(window, cx)
+                                        });
+                                    bar.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .border_l_1()
+                                            .border_color(border)
+                                            .pl_2()
+                                            .child(size),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .border_l_1()
+                                            .border_color(border)
+                                            .pl_2()
+                                            .child(name),
+                                    )
+                                },
+                            ),
+                    )
+                    .child(self.file_status_tools(width, cx)),
             )
     }
 
@@ -467,6 +501,7 @@ impl App {
     pub(super) fn copy_path_button(
         &self,
         path: Option<PathBuf>,
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let label = "复制路径";
@@ -474,6 +509,7 @@ impl App {
             "copy-path",
             icon_button("copy-full-path", IconName::Copy, label)
                 .small()
+                .when(compact, |button| button.with_size(px(20.)))
                 .disabled(path.is_none())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let Some(path) = path.as_deref() else { return };
@@ -490,13 +526,140 @@ impl App {
         )
     }
 
-    pub(super) fn hidden_files_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let show_hidden = self.panes[self.pane_target].browser.show_hidden;
-        let (icon, label) = if show_hidden {
-            (IconName::Eye, "隐藏隐藏文件")
+    fn file_status_tools(&self, width: Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let pane = self.pane();
+        let pane_id = pane.id;
+        let list = pane.view_mode == ViewMode::List;
+        let compact = width < px(190.);
+        let tight = width < px(85.);
+        let external = cx.global::<ActivePreferences>().0.terminal.mode == TerminalMode::External;
+        let terminal_visible = !external && self.embedded_terminal_visible();
+        let terminal_label = if external {
+            "打开外部终端"
+        } else if terminal_visible {
+            "隐藏内嵌终端"
         } else {
-            (IconName::EyeOff, "显示隐藏文件")
+            "打开内嵌终端"
         };
+        let owner = cx.weak_entity();
+        h_flex()
+            .flex_shrink_0()
+            .gap_1()
+            .when(tight, |tools| tools.gap(px(1.)))
+            .child(with_anchored_tooltip(
+                "file-status-terminal",
+                icon_button(
+                    "file-status-terminal-trigger",
+                    IconName::SquareTerminal,
+                    terminal_label,
+                )
+                .small()
+                .when(tight, |button| button.with_size(px(16.)))
+                .selected(terminal_visible)
+                .toggled(terminal_visible)
+                .disabled(external && self.location().is_none())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.with_pane(pane_id, |this| this.toggle_terminal(window, cx));
+                })),
+                terminal_label,
+            ))
+            .when(!compact, |tools| {
+                tools
+                    .child(self.view_switch_button(cx))
+                    .child(self.hidden_files_button(cx))
+            })
+            .child(with_anchored_tooltip(
+                "file-status-properties",
+                icon_button("file-status-properties-trigger", IconName::Info, "属性")
+                    .small()
+                    .when(tight, |button| button.with_size(px(16.)))
+                    .disabled(
+                        pane.browser.single_selected_entry().is_none() && self.location().is_none(),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.with_pane(pane_id, |this| this.open_status_properties(window, cx));
+                    })),
+                "属性",
+            ))
+            .when(compact || list, |tools| {
+                tools.child(
+                    Popover::new("file-status-more")
+                        .anchor(Anchor::BottomRight)
+                        .trigger(
+                            icon_button(
+                                "file-status-more-trigger",
+                                IconName::Ellipsis,
+                                if compact {
+                                    "更多文件浏览操作"
+                                } else {
+                                    "列表列设置"
+                                },
+                            )
+                            .small()
+                            .when(tight, |button| button.with_size(px(16.))),
+                        )
+                        .content(move |_, _, cx| {
+                            let app = owner.upgrade();
+                            let status_actions = app.and_then(|app| {
+                                let app = app.read(cx);
+                                let pane = app.panes.iter().find(|pane| pane.id == pane_id)?;
+                                Some((pane.view_mode, pane.browser.show_hidden))
+                            });
+                            let mut panel = v_flex().gap_2().min_w(px(174.));
+                            if let Some((mode, show_hidden)) = status_actions.filter(|_| compact) {
+                                let pane_owner = owner.clone();
+                                let (next, _, label) = next_view_mode(mode);
+                                panel = panel.child(
+                                    Button::new("switch-view").small().label(label).on_click(
+                                        move |_, _, cx| {
+                                            let _ = pane_owner.update(cx, |app, cx| {
+                                                app.with_pane(pane_id, |app| {
+                                                    app.set_view_mode(next, cx)
+                                                });
+                                            });
+                                        },
+                                    ),
+                                );
+                                let pane_owner = owner.clone();
+                                panel = panel.child(
+                                    Button::new("toggle-hidden")
+                                        .small()
+                                        .label(hidden_files_control(show_hidden).1)
+                                        .on_click(move |_, _, cx| {
+                                            let _ = pane_owner.update(cx, |app, cx| {
+                                                app.with_pane(pane_id, |app| {
+                                                    app.set_show_hidden_files(!show_hidden, cx)
+                                                });
+                                            });
+                                        }),
+                                );
+                            }
+                            panel.when(
+                                status_actions.map_or(list, |(mode, _)| mode == ViewMode::List),
+                                |panel| {
+                                    panel
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("列表列设置"),
+                                        )
+                                        .child(
+                                            div()
+                                                .max_h(px(230.))
+                                                .child(file_columns_controls(cx))
+                                                .overflow_y_scrollbar(),
+                                        )
+                                },
+                            )
+                        }),
+                )
+            })
+    }
+
+    fn hidden_files_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let show_hidden = self.panes[self.pane_target].browser.show_hidden;
+        let (icon, label) = hidden_files_control(show_hidden);
         with_anchored_tooltip(
             "hidden-files",
             icon_button("toggle-hidden-files", icon, label)
@@ -513,11 +676,8 @@ impl App {
         )
     }
 
-    pub(super) fn view_switch_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let (mode, icon, label) = match self.panes[self.pane_target].view_mode {
-            ViewMode::List => (ViewMode::Grid, IconName::LayoutGrid, "切换到网格视图"),
-            ViewMode::Grid => (ViewMode::List, IconName::Rows3, "切换到列表视图"),
-        };
+    fn view_switch_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (mode, icon, label) = next_view_mode(self.pane().view_mode);
 
         with_anchored_tooltip(
             "file-view-mode",

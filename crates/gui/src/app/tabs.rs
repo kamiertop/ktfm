@@ -309,6 +309,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_path_editor(window, cx);
         self.panes[self.pane_target].navigation_revision += 1;
         let search = saved.as_ref().map_or("", |state| state.search.as_str());
         self.panes[self.pane_target].browser.query = search.trim().to_lowercase();

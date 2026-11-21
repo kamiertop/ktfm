@@ -12,9 +12,7 @@ use settings::config::{
 };
 
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
-use super::file_operations::{
-    DirectoryProperties, FileAction, FileClipboard, FileJobs, FileNameEditor,
-};
+use super::file_operations::{FileAction, FileClipboard, FileJobs, FileNameEditor, FileProperties};
 use super::io_queue::IoQueue;
 use super::keymap;
 use super::keymap::{
@@ -43,7 +41,7 @@ pub struct App {
     pub(super) focus: FocusHandle,
     pub(super) file_job: Option<daemon::job::JobKind>,
     pub(super) file_name_editor: Option<FileNameEditor>,
-    pub(super) directory_properties: Option<DirectoryProperties>,
+    pub(super) file_properties: Option<FileProperties>,
     pub(super) bookmarks: Entity<Bookmarks>,
     pub(super) bookmark_rename: Option<BookmarkRename>,
     pub(super) bookmark_properties: Option<BookmarkProperties>,
@@ -65,7 +63,7 @@ impl Global for SharedTags {}
 impl App {
     pub fn open_main_window(cx: &mut gpui_kit::App) {
         cx.set_global(FileClipboard::default());
-        keymap::bind_cancel_cut(cx);
+        keymap::bind_fixed_keys(cx);
         cx.set_global(FileJobs::default());
         let writer = WorkspaceWriter::default();
         cx.set_global(writer.clone());
@@ -205,7 +203,7 @@ impl App {
             focus,
             file_job: None,
             file_name_editor: None,
-            directory_properties: None,
+            file_properties: None,
             panes: vec![pane],
             thumbnails: Thumbnails::new(),
             pane_target: 0,
@@ -307,7 +305,7 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &OpenPreferences, _, cx| this.open_preferences(cx)))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 if this.file_name_editor.is_none()
-                    && this.directory_properties.is_none()
+                    && this.file_properties.is_none()
                     && this.tag_editor.is_none()
                 {
                     this.open_new_tab(window, cx);
@@ -315,7 +313,7 @@ impl Render for App {
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if this.file_name_editor.is_none()
-                    && this.directory_properties.is_none()
+                    && this.file_properties.is_none()
                     && this.tag_editor.is_none()
                 {
                     this.close_tab(this.panes[this.pane_target].active_tab, window, cx);
@@ -373,7 +371,7 @@ impl Render for App {
             .children(self.bookmark_rename_view(cx))
             .children(self.bookmark_properties_dialog(cx))
             .children(self.file_name_dialog(cx))
-            .children(self.directory_properties_dialog(cx))
+            .children(self.file_properties_dialog(cx))
             .children(self.tag_editor_dialog(cx))
     }
 }

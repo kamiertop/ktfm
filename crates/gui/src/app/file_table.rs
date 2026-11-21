@@ -5,7 +5,7 @@ use daemon::browse::{FileSort, SortColumn, SortDirection};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Disableable as _;
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenu};
-use gpui_kit::component::popover::Popover;
+use gpui_kit::component::popover::PopoverState;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::table::{
@@ -570,71 +570,60 @@ fn move_column(cx: &mut gpui_kit::App, column: FileColumn, direction: isize) {
     });
 }
 
-impl App {
-    pub(super) fn file_columns_button(&self) -> impl IntoElement + use<> {
-        Popover::new("file-list-columns")
-            .anchor(Anchor::TopRight)
-            .trigger(
-                icon_button(
-                    "file-list-columns-trigger",
-                    IconName::Ellipsis,
-                    "列表列设置",
+pub(super) fn file_columns_controls(cx: &mut Context<PopoverState>) -> impl IntoElement + use<> {
+    let settings = &cx.global::<FileColumnPreferences>().0.columns;
+    let last = settings.len().saturating_sub(1);
+    v_flex()
+        .min_w(px(230.))
+        .pr_5()
+        .gap_1()
+        .children(settings.iter().enumerate().map(|(index, setting)| {
+            let column = setting.column;
+            let label = column_label(column);
+            h_flex()
+                .id(label)
+                .gap_2()
+                .child(
+                    Switch::new("visible")
+                        .accessibility_label(label)
+                        .checked(setting.visible)
+                        .disabled(column == FileColumn::Name)
+                        .on_change(cx.listener(move |_, checked: &bool, _, cx| {
+                            update_column_preferences(cx, |layout| {
+                                if let Some(setting) = layout
+                                    .columns
+                                    .iter_mut()
+                                    .find(|setting| setting.column == column)
+                                {
+                                    setting.visible = *checked;
+                                }
+                            });
+                            cx.notify();
+                        })),
                 )
-                .small(),
-            )
-            .content(|_, _, cx| {
-                let settings = &cx.global::<FileColumnPreferences>().0.columns;
-                let last = settings.len().saturating_sub(1);
-                v_flex()
-                    .min_w(px(230.))
-                    .gap_1()
-                    .children(settings.iter().enumerate().map(|(index, setting)| {
-                        let column = setting.column;
-                        let label = column_label(column);
-                        h_flex()
-                            .id(label)
-                            .gap_2()
-                            .child(
-                                Switch::new("visible")
-                                    .accessibility_label(label)
-                                    .checked(setting.visible)
-                                    .disabled(column == FileColumn::Name)
-                                    .on_change(cx.listener(move |_, checked: &bool, _, cx| {
-                                        update_column_preferences(cx, |layout| {
-                                            if let Some(setting) = layout
-                                                .columns
-                                                .iter_mut()
-                                                .find(|setting| setting.column == column)
-                                            {
-                                                setting.visible = *checked;
-                                            }
-                                        });
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(div().flex_1().child(label))
-                            .child(
-                                icon_button("move-up", IconName::ArrowUp, "上移列")
-                                    .small()
-                                    .disabled(index <= 1)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        move_column(cx, column, -1);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                icon_button("move-down", IconName::ArrowDown, "下移列")
-                                    .small()
-                                    .disabled(index == 0 || index == last)
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        move_column(cx, column, 1);
-                                        cx.notify();
-                                    })),
-                            )
-                    }))
-            })
-    }
+                .child(div().flex_1().child(label))
+                .child(
+                    icon_button("move-up", IconName::ArrowUp, "上移列")
+                        .small()
+                        .disabled(index <= 1)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            move_column(cx, column, -1);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    icon_button("move-down", IconName::ArrowDown, "下移列")
+                        .small()
+                        .disabled(index == 0 || index == last)
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            move_column(cx, column, 1);
+                            cx.notify();
+                        })),
+                )
+        }))
+}
 
+impl App {
     pub(super) fn file_list_table(
         &mut self,
         width: Pixels,

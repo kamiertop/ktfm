@@ -21,6 +21,10 @@ actions!(
         NewTab,
         CloseTab,
         CancelCut,
+        CancelPathEdit,
+        SubmitPathEdit,
+        NextPathSuggestion,
+        PreviousPathSuggestion,
         OpenTerminal,
         OpenPreferences,
         ZoomIn,
@@ -42,12 +46,18 @@ actions!(browser, [TerminalCopy, TerminalPaste]);
 const CANCEL_CUT_KEY: &str = "escape";
 const CANCEL_CUT_LABEL: &str = "取消剪切";
 
-pub(super) fn bind_cancel_cut(cx: &mut gpui_kit::App) {
-    cx.bind_keys([KeyBinding::new(
-        CANCEL_CUT_KEY,
-        CancelCut,
-        Some("PendingFileCut && !EmbeddedTerminal"),
-    )]);
+pub(super) fn bind_fixed_keys(cx: &mut gpui_kit::App) {
+    cx.bind_keys([
+        KeyBinding::new(
+            CANCEL_CUT_KEY,
+            CancelCut,
+            Some("PendingFileCut && !EmbeddedTerminal && !PathEditor"),
+        ),
+        KeyBinding::new("escape", CancelPathEdit, Some("PathEditor")),
+        KeyBinding::new("enter", SubmitPathEdit, Some("PathEditor > Input")),
+        KeyBinding::new("down", NextPathSuggestion, Some("PathEditor > Input")),
+        KeyBinding::new("up", PreviousPathSuggestion, Some("PathEditor > Input")),
+    ]);
 }
 
 /// 快捷键的生效范围，决定绑定的按键上下文与冲突判定。

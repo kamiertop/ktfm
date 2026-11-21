@@ -17,7 +17,7 @@ impl App {
         }
         if cx.global::<ActivePreferences>().0.terminal.mode == TerminalMode::Embedded {
             if self.file_name_editor.is_none()
-                && self.directory_properties.is_none()
+                && self.file_properties.is_none()
                 && self.bookmark_rename.is_none()
                 && self.bookmark_properties.is_none()
             {
