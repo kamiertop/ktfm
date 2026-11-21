@@ -23,7 +23,7 @@ use super::preferences::{ActivePreferences, Preferences};
 use super::tabs::{BrowserTab, restore_tabs};
 use super::tags::{TagEditor, TagState};
 use super::thumbnails::Thumbnails;
-use super::volumes::{SharedStorage, StorageDevices};
+use super::volumes::{SharedStorage, StorageDevices, VolumeUnlock, VolumeUnmounted};
 use super::window_geometry::{self, GeometrySaver};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
@@ -52,6 +52,7 @@ pub struct App {
     pub(super) workspace_error: Option<String>,
     pub(super) tag_editor: Option<TagEditor>,
     pub(super) storage: Entity<StorageDevices>,
+    pub(super) volume_unlock: Option<VolumeUnlock>,
     pub(super) default_favorites: Vec<SidebarItem>,
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
@@ -218,7 +219,8 @@ impl App {
             workspace_writable: workspace_error.is_none(),
             workspace_error,
             tag_editor: None,
-            storage: cx.global::<SharedStorage>().0.clone(),
+            storage: cx.global::<SharedStorage>().state.clone(),
+            volume_unlock: None,
             default_favorites: default_favorites(home),
             preferences: None,
         };
@@ -244,6 +246,14 @@ impl App {
         })
         .detach();
         cx.observe(&app.storage, |_, _, cx| cx.notify()).detach();
+        cx.subscribe_in(
+            &app.storage,
+            window,
+            |app, _, event: &VolumeUnmounted, window, cx| {
+                app.leave_unmounted_volume(&event.0, window, cx);
+            },
+        )
+        .detach();
         GeometrySaver::observe(window, cx);
         app.load_directory(cx);
         if persist_session
@@ -307,6 +317,7 @@ impl Render for App {
                 if this.file_name_editor.is_none()
                     && this.file_properties.is_none()
                     && this.tag_editor.is_none()
+                    && this.volume_unlock.is_none()
                 {
                     this.open_new_tab(window, cx);
                 }
@@ -315,6 +326,7 @@ impl Render for App {
                 if this.file_name_editor.is_none()
                     && this.file_properties.is_none()
                     && this.tag_editor.is_none()
+                    && this.volume_unlock.is_none()
                 {
                     this.close_tab(this.panes[this.pane_target].active_tab, window, cx);
                 }
@@ -373,5 +385,6 @@ impl Render for App {
             .children(self.file_name_dialog(cx))
             .children(self.file_properties_dialog(cx))
             .children(self.tag_editor_dialog(cx))
+            .children(self.volume_unlock_dialog(cx))
     }
 }

@@ -2979,6 +2979,7 @@ dependencies = [
  "chrono",
  "daemon",
  "directories",
+ "futures-lite",
  "gpui-kit",
  "hex_color",
  "rust-embed",
@@ -2989,6 +2990,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vfs",
+ "zeroize",
 ]
 
 [[package]]
@@ -6910,15 +6912,19 @@ dependencies = [
 name = "sys"
 version = "0.1.0"
 dependencies = [
+ "async-process",
  "directories",
  "freedesktop-icons",
+ "futures-lite",
  "md-5",
  "png 0.18.1",
+ "rustix 1.1.6",
  "serde",
  "serde_json",
  "tempfile",
  "url",
  "xdg-mime",
+ "zbus 5.19.0",
 ]
 
 [[package]]

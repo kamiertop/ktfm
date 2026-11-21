@@ -10,12 +10,16 @@ use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::tab::Location;
+use sys::mount::{Volume, VolumeSource};
 
 use super::App;
 use super::bookmarks::BookmarkDrag;
 use super::tags::tag_color;
+use super::volumes::VolumeOperation;
 use crate::components::icon_button;
-use crate::style::{SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color, sidebar_divider_color};
+use crate::style::{
+    SIDEBAR_ICON_SIZE, SIDEBAR_WIDTH, icon_color, sidebar_divider_color, volume_usage_color,
+};
 
 impl App {
     pub(super) fn is_default_favorite(&self, path: &Path) -> bool {
@@ -136,31 +140,46 @@ impl App {
         });
 
         let storage = self.storage.read(cx);
+        let active_volume = location.and_then(|path| {
+            storage
+                .volumes
+                .iter()
+                .filter_map(|volume| {
+                    let mountpoint = volume.mountpoint.as_deref()?;
+                    path.starts_with(mountpoint).then_some((volume, mountpoint))
+                })
+                .max_by_key(|(_, mountpoint)| mountpoint.components().count())
+                .map(|(volume, _)| &volume.source)
+        });
         let volumes = storage.volumes.iter().map(|volume| {
-            let is_mounting = storage.mounting.as_ref() == Some(&volume.device);
-            let label = if is_mounting {
-                format!("{}（挂载中）", volume.label)
-            } else {
-                volume.label.clone()
-            };
-            let active = volume.mountpoint.is_some() && volume.mountpoint.as_deref() == location;
-            let row = sidebar_row(
-                SharedString::from(format!("volume-{}", volume.device.display())),
-                label,
-                if volume.removable {
-                    IconName::Usb
-                } else {
-                    IconName::HardDrive
-                },
-                None,
-                active,
-                cx,
-            );
-            let volume = volume.clone();
+            let operation = storage
+                .operation
+                .as_ref()
+                .filter(|operation| operation.source == volume.source);
+            let active = active_volume == Some(&volume.source);
+            let row = volume_row(volume, active, operation, cx);
+            let source = volume.source.clone();
+            let open_source = source.clone();
+            let owner = entity.clone();
             row.cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_volume(&volume, window, cx);
+                    let volume = this
+                        .storage
+                        .read(cx)
+                        .volumes
+                        .iter()
+                        .find(|volume| volume.source == open_source)
+                        .cloned();
+                    if let Some(volume) = volume {
+                        this.open_volume(&volume, window, cx);
+                    }
                 }))
+                .context_menu(move |menu, _, cx| {
+                    let Some(app) = owner.upgrade() else {
+                        return menu;
+                    };
+                    app.read(cx).build_volume_menu(menu, &source, &owner, cx)
+                })
         });
 
         let content = v_flex()
@@ -299,6 +318,19 @@ fn sidebar_row(
     cx: &gpui_kit::App,
 ) -> Stateful<Div> {
     let theme = cx.theme();
+    sidebar_row_base(id, icon, color, cx)
+        .when(active, |row| row.bg(theme.sidebar_accent).font_semibold())
+        .when(!active, |row| row.hover(|style| style.bg(theme.list_hover)))
+        .child(div().min_w_0().truncate().child(name))
+}
+
+fn sidebar_row_base(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    color: Option<Hsla>,
+    cx: &gpui_kit::App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
     h_flex()
         .id(id)
         .h_8()
@@ -306,15 +338,113 @@ fn sidebar_row(
         .gap_2()
         .rounded_md()
         .text_base()
-        .when(active, |row| row.bg(theme.sidebar_accent).font_semibold())
-        .when(!active, |row| row.hover(|style| style.bg(theme.list_hover)))
         .child(
             Icon::new(icon)
                 .size(SIDEBAR_ICON_SIZE)
                 .flex_shrink_0()
                 .text_color(color.unwrap_or_else(|| icon_color(icon, theme.mode))),
         )
-        .child(div().min_w_0().truncate().child(name))
+}
+
+fn volume_row(
+    volume: &Volume,
+    active: bool,
+    operation: Option<&VolumeOperation>,
+    cx: &gpui_kit::App,
+) -> Stateful<Div> {
+    let theme = cx.theme();
+    let icon = if volume.locked {
+        IconName::LockKeyhole
+    } else if matches!(volume.source, VolumeSource::Phone(_)) {
+        IconName::Smartphone
+    } else if volume.removable {
+        IconName::Usb
+    } else {
+        IconName::HardDrive
+    };
+    let status = if let Some(operation) = operation {
+        if operation.unmounting {
+            "卸载中…"
+        } else if volume.locked {
+            "解锁中…"
+        } else {
+            "挂载中…"
+        }
+    } else if volume.locked {
+        "已锁定"
+    } else if !volume.mounted {
+        "未挂载"
+    } else {
+        "已挂载"
+    };
+    let used = volume
+        .usage
+        .filter(|usage| operation.is_none() && usage.total > 0)
+        .map(|usage| usage.used.min(usage.total) as f64 / usage.total as f64);
+    let ratio = used.unwrap_or_default();
+    let tint = volume_usage_color(theme.mode, ratio);
+    let track_tint = theme.sidebar_foreground.opacity(0.075);
+    let background = volume_background(theme.sidebar.blend(track_tint), tint, ratio);
+    let hover_background = volume_background(theme.list_hover.blend(track_tint), tint, ratio);
+    let label = if let Some(used) = used {
+        format!("{}，{status}，已用 {:.0}%", volume.label, used * 100.)
+    } else {
+        format!("{}，{status}", volume.label)
+    };
+    let label = if active {
+        format!("{label}，当前设备")
+    } else {
+        label
+    };
+    sidebar_row_base(
+        SharedString::from(format!("volume-{}", volume.source)),
+        icon,
+        None,
+        cx,
+    )
+    .bg(background)
+    .hover(move |style| style.bg(hover_background))
+    .role(Role::Button)
+    .aria_label(label)
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .when(active, |name| name.font_semibold())
+            .child(volume.label.clone()),
+    )
+    .when(operation.is_some(), |row| {
+        row.child(
+            div()
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(status),
+        )
+    })
+    .when(active && operation.is_none(), |row| {
+        row.child(
+            Icon::new(IconName::Check)
+                .size(px(14.))
+                .flex_shrink_0()
+                .text_color(theme.sidebar_foreground),
+        )
+    })
+}
+
+fn volume_background(background: Hsla, tint: Hsla, used: f64) -> Background {
+    let filled = background.blend(tint);
+    match used as f32 {
+        0. => background.into(),
+        1. => filled.into(),
+        // 着色器要求两个色标的位置不同；把过渡压缩到不到一个像素。
+        used => linear_gradient(
+            90.,
+            linear_color_stop(filled, (used - 0.0005).max(0.)),
+            linear_color_stop(background, (used + 0.0005).min(1.)),
+        ),
+    }
 }
 
 fn section(cx: &gpui_kit::App) -> Div {

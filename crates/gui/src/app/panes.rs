@@ -149,6 +149,7 @@ impl App {
             && self.tag_editor.is_none()
             && self.bookmark_rename.is_none()
             && self.bookmark_properties.is_none()
+            && self.volume_unlock.is_none()
     }
 
     pub(super) fn can_split(&self, layout: SplitLayout) -> bool {

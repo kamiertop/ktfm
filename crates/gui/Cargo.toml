@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+zeroize = "1.9"
 gpui-kit = "0.10.0"
 anyhow.workspace = true
 async-channel = "2.5"
+futures-lite.workspace = true
 chrono.workspace = true
 alacritty_terminal = { version = "0.26", default-features = false }
 directories.workspace = true

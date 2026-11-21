@@ -86,6 +86,23 @@ pub fn sidebar_divider_color(mode: ThemeMode) -> Hsla {
     .into()
 }
 
+pub fn volume_usage_color(mode: ThemeMode, used: f64) -> Hsla {
+    let (normal, warning, critical) = if mode.is_dark() {
+        (0x5aa5f2, 0xefb35c, 0xef7582)
+    } else {
+        (0x407ebf, 0xd98b18, 0xd44858)
+    };
+    rgb(if used >= 0.9 {
+        critical
+    } else if used >= 0.8 {
+        warning
+    } else {
+        normal
+    })
+    .alpha(0.32)
+    .into()
+}
+
 pub fn file_selection_color(mode: ThemeMode) -> Hsla {
     rgb(if mode.is_dark() { 0x36577d } else { 0xb4d3f7 }).into()
 }

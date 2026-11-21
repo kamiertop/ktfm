@@ -14,7 +14,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use vfs::EntryKind;
 
-use super::{App, browser::DirectoryState};
+use super::{App, browser::DirectoryState, volumes::SharedStorage};
 use crate::components::popup_surface;
 use crate::model::entry_appearance;
 
@@ -182,11 +182,18 @@ pub(super) struct FileNameEditor {
 }
 
 pub(super) struct FileProperties {
-    path: PathBuf,
-    kind: EntryKind,
-    size: Option<u64>,
-    contents: Option<(usize, usize)>,
+    target: PropertiesTarget,
     focus: FocusHandle,
+}
+
+enum PropertiesTarget {
+    Entry {
+        path: PathBuf,
+        kind: EntryKind,
+        size: Option<u64>,
+        contents: Option<(usize, usize)>,
+    },
+    Volume(sys::mount::Volume),
 }
 
 #[derive(Clone)]
@@ -493,6 +500,7 @@ impl App {
                 cx.global_mut::<FileJobs>().running -= 1;
                 cx.global_mut::<FileClipboard>()
                     .finish_job(&outcome, clipboard_revision);
+                SharedStorage::request_usage_refresh(cx);
                 FileJobs::quit_if_idle(cx);
             });
             let _ = this.update_in(cx, |this, window, cx| {
@@ -608,12 +616,11 @@ impl App {
             _ => None,
         };
         self.show_file_properties(
-            FileProperties {
+            PropertiesTarget::Entry {
                 path,
                 kind: EntryKind::Directory,
                 size: None,
                 contents,
-                focus: cx.focus_handle(),
             },
             window,
             cx,
@@ -628,24 +635,35 @@ impl App {
             self.open_directory_properties(window, cx);
             return;
         };
-        let properties = FileProperties {
+        let target = PropertiesTarget::Entry {
             path: entry.path.clone(),
             kind: entry.kind,
             size: entry.size.filter(|_| entry.kind == EntryKind::File),
             contents: None,
-            focus: cx.focus_handle(),
         };
-        self.show_file_properties(properties, window, cx);
+        self.show_file_properties(target, window, cx);
+    }
+
+    pub(super) fn open_volume_properties(
+        &mut self,
+        volume: sys::mount::Volume,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_changes_allowed() {
+            self.show_file_properties(PropertiesTarget::Volume(volume), window, cx);
+        }
     }
 
     fn show_file_properties(
         &mut self,
-        properties: FileProperties,
+        target: PropertiesTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        window.focus(&properties.focus, cx);
-        self.file_properties = Some(properties);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        self.file_properties = Some(FileProperties { target, focus });
         cx.notify();
     }
 
@@ -658,11 +676,55 @@ impl App {
     pub(super) fn file_properties_dialog(&self, cx: &mut Context<Self>) -> Option<Dialog> {
         let properties = self.file_properties.as_ref()?;
         let owner = cx.weak_entity();
-        let name = properties
-            .path
-            .file_name()
-            .unwrap_or(properties.path.as_os_str());
-        let (_, kind, _) = entry_appearance(properties.kind, &properties.path);
+        let details = v_flex().min_w_0().gap_1().text_sm();
+        let details = match &properties.target {
+            PropertiesTarget::Entry {
+                path,
+                kind,
+                size,
+                contents,
+            } => {
+                let name = path.file_name().unwrap_or(path.as_os_str());
+                let (_, kind, _) = entry_appearance(*kind, path);
+                details
+                    .child(format!("名称　{}", name.to_string_lossy()))
+                    .child(format!("类型　{kind}"))
+                    .child(format!("路径　{}", path.display()))
+                    .when_some(*size, |details, size| {
+                        details.child(format!("大小　{}", format_size(size)))
+                    })
+                    .when_some(*contents, |details, (entries, read_errors)| {
+                        details
+                            .child(format!("直接包含　{entries} 项"))
+                            .when(read_errors > 0, |details| {
+                                details.child(format!("读取失败　{read_errors} 项"))
+                            })
+                    })
+            }
+            PropertiesTarget::Volume(volume) => {
+                let status = if volume.locked {
+                    "已锁定"
+                } else if volume.mounted {
+                    "已挂载"
+                } else {
+                    "未挂载"
+                };
+                details
+                    .child(format!("名称　{}", volume.label))
+                    .child(format!("设备　{}", volume.source))
+                    .child(format!("状态　{status}"))
+                    .when_some(volume.mountpoint.as_ref(), |details, path| {
+                        details.child(format!("挂载点　{}", path.display()))
+                    })
+                    .when_some(
+                        volume.usage.map(|usage| usage.total).or(volume.capacity),
+                        |details, total| details.child(format!("容量　{}", format_size(total))),
+                    )
+                    .when_some(volume.usage, |details, usage| {
+                        details.child(format!("已用　{}", format_size(usage.used)))
+                    })
+            }
+        };
         Some(
             Dialog::new(cx)
                 .focus_handle(properties.focus.clone())
@@ -684,29 +746,7 @@ impl App {
                         .flex_col()
                         .gap_3()
                         .child(div().font_weight(FontWeight::SEMIBOLD).child("属性"))
-                        .child(
-                            v_flex()
-                                .min_w_0()
-                                .gap_1()
-                                .text_sm()
-                                .child(format!("名称　{}", name.to_string_lossy()))
-                                .child(format!("类型　{kind}"))
-                                .child(format!("路径　{}", properties.path.display()))
-                                .when_some(properties.size, |details, size| {
-                                    details.child(format!("大小　{}", format_size(size)))
-                                })
-                                .when_some(
-                                    properties.contents,
-                                    |details, (entries, read_errors)| {
-                                        details.child(format!("直接包含　{entries} 项")).when(
-                                            read_errors > 0,
-                                            |details| {
-                                                details.child(format!("读取失败　{read_errors} 项"))
-                                            },
-                                        )
-                                    },
-                                ),
-                        )
+                        .child(details)
                         .child(
                             h_flex().justify_end().child(
                                 Button::new("close-directory-properties")
