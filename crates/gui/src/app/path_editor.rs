@@ -343,20 +343,45 @@ fn path_suggestions(
     home: Option<&Path>,
     show_hidden: bool,
 ) -> Vec<String> {
-    let Some(entries) = resolve_path(value, base, home).and_then(|path| path.read_dir().ok())
-    else {
+    let Some(path) = resolve_path(value, base, home) else {
         return Vec::new();
     };
-    let mut prefix = value.to_owned();
-    if !prefix.ends_with(MAIN_SEPARATOR) {
-        prefix.push(MAIN_SEPARATOR);
-    }
+    let (entries, prefix, partial) = match path.read_dir() {
+        Ok(entries) => {
+            let mut prefix = value.to_owned();
+            if !prefix.ends_with(MAIN_SEPARATOR) {
+                prefix.push(MAIN_SEPARATOR);
+            }
+            (entries, prefix, "")
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) && !value.ends_with(MAIN_SEPARATOR) =>
+        {
+            let start = value
+                .rfind(MAIN_SEPARATOR)
+                .map_or(0, |index| index + MAIN_SEPARATOR.len_utf8());
+            let (parent, partial) = value.split_at(start);
+            let Some(entries) =
+                resolve_path(parent, base, home).and_then(|path| path.read_dir().ok())
+            else {
+                return Vec::new();
+            };
+            (entries, parent.to_owned(), partial)
+        }
+        Err(_) => return Vec::new(),
+    };
     let mut suggestions = std::collections::BTreeSet::new();
     for entry in entries.flatten() {
         let Ok(entry_name) = entry.file_name().into_string() else {
             continue;
         };
-        if !show_hidden && entry_name.starts_with('.') {
+        if !entry_name.starts_with(partial)
+            || entry_name == partial
+            || (!show_hidden && !partial.starts_with('.') && entry_name.starts_with('.'))
+        {
             continue;
         }
         let Ok(kind) = entry.file_type() else {
@@ -423,7 +448,10 @@ mod tests {
                     ["./my folder/child/"],
                 );
             }
-            assert!(path_suggestions("./my fold", Some(&root), None, false).is_empty());
+            assert_eq!(
+                path_suggestions("./my fold", Some(&root), None, false),
+                ["./my folder/"]
+            );
             assert!(path_suggestions("./my file", Some(&root), None, false).is_empty());
             assert_eq!(
                 validate_location("my folder/..", Some(&root), None),
@@ -434,6 +462,38 @@ mod tests {
                 vfs::EntryKind::File
             );
             assert!(validate_location("missing", Some(&root), None).is_err());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
+    }
+
+    #[test]
+    fn completes_only_the_last_component_of_a_path() -> std::io::Result<()> {
+        let root = std::env::temp_dir().join(format!("ktfm-test-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root)?;
+        let result = (|| {
+            std::fs::create_dir_all(root.join("a/b/cxx-work"))?;
+            std::fs::create_dir_all(root.join("a/b/.cxx-cache"))?;
+            std::fs::create_dir(root.join("a/b/notes"))?;
+            std::fs::write(root.join("a/b/cxx.txt"), "")?;
+
+            for prefix in [
+                "a/b/".into(),
+                "~/a/b/".into(),
+                format!("{}/a/b/", root.display()),
+            ] {
+                assert_eq!(
+                    path_suggestions(&format!("{prefix}cxx"), Some(&root), Some(&root), false),
+                    [format!("{prefix}cxx-work/"), format!("{prefix}cxx.txt")]
+                );
+            }
+            assert_eq!(
+                path_suggestions("a/b/.cx", Some(&root), None, false),
+                ["a/b/.cxx-cache/"]
+            );
+            assert!(path_suggestions("a/b/cxx/", Some(&root), None, false).is_empty());
+            assert!(path_suggestions("a/missing/cxx", Some(&root), None, false).is_empty());
             Ok(())
         })();
         std::fs::remove_dir_all(root)?;

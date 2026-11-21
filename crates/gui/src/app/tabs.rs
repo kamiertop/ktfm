@@ -118,6 +118,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.recent_directories.remove_under(mountpoint);
         self.close_file_name_on_mount(mountpoint, window, cx);
         let destination = self
             .home()
@@ -369,7 +370,7 @@ impl App {
             input.set_value(search, window, cx);
         });
         self.panes[self.pane_target].browser.tab_restore = saved;
-        self.load_directory(cx);
+        self.load_directory(window, cx);
         self.save_workspace(cx);
     }
 

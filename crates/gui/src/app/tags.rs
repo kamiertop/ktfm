@@ -178,7 +178,7 @@ impl App {
                 if self.panes[self.pane_target].navigation_revision == navigation
                     && matches!(self.current_location(), Some(Location::Tag { .. }))
                 {
-                    self.load_directory(cx);
+                    self.load_directory(window, cx);
                 }
             }
             TagChange::Paths(id) => {

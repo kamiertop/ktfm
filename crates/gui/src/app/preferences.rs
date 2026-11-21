@@ -41,15 +41,19 @@ enum Page {
     Behavior,
     Shortcuts,
     Terminal,
+    #[cfg(target_os = "linux")]
+    Cache,
     About,
 }
 
 impl Page {
-    const ALL: [Self; 5] = [
+    const ALL: &[Self] = &[
         Self::View,
         Self::Behavior,
         Self::Terminal,
         Self::Shortcuts,
+        #[cfg(target_os = "linux")]
+        Self::Cache,
         Self::About,
     ];
 
@@ -59,6 +63,8 @@ impl Page {
             Self::Behavior => ("操作行为", IconName::Mouse),
             Self::Terminal => ("终端", IconName::Terminal),
             Self::Shortcuts => ("快捷键", IconName::Keyboard),
+            #[cfg(target_os = "linux")]
+            Self::Cache => ("缓存", IconName::Database),
             Self::About => ("关于", IconName::Info),
         }
     }
@@ -142,6 +148,15 @@ impl PreferenceValues {
     }
 }
 
+#[cfg(target_os = "linux")]
+enum CacheStatus {
+    Idle,
+    Reading,
+    Clearing,
+    Usage(u64),
+    Failed(String),
+}
+
 /// 设置窗口持有自己的草稿，只有保存成功才更新文件管理器。
 pub(super) struct Preferences {
     owner: WeakEntity<App>,
@@ -155,6 +170,8 @@ pub(super) struct Preferences {
     shortcut_focus: FocusHandle,
     choosing_program: bool,
     terminal_background: Entity<InputState>,
+    #[cfg(target_os = "linux")]
+    cache_status: CacheStatus,
     error: Option<String>,
 }
 
@@ -236,6 +253,8 @@ impl App {
                     recording: None,
                     choosing_program: false,
                     terminal_background,
+                    #[cfg(target_os = "linux")]
+                    cache_status: CacheStatus::Idle,
                     error: None,
                 }
             })
@@ -552,7 +571,7 @@ impl Preferences {
             .bg(palette.sidebar)
             .border_r_1()
             .border_color(palette.border)
-            .children(Page::ALL.into_iter().map(|page| {
+            .children(Page::ALL.iter().copied().map(|page| {
                 let (label, icon) = page.appearance();
                 let active = self.page == page;
                 h_flex()
@@ -572,6 +591,10 @@ impl Preferences {
                     .when(!active, |row| row.hover(|style| style.bg(palette.hover)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.page = page;
+                        #[cfg(target_os = "linux")]
+                        if page == Page::Cache {
+                            this.update_thumbnail_cache(false, cx);
+                        }
                         window.focus(&this.focus, cx);
                         cx.notify();
                     }))
@@ -867,6 +890,79 @@ impl Preferences {
         )
     }
 
+    #[cfg(target_os = "linux")]
+    fn update_thumbnail_cache(&mut self, clear: bool, cx: &mut Context<Self>) {
+        if matches!(
+            self.cache_status,
+            CacheStatus::Reading | CacheStatus::Clearing
+        ) {
+            return;
+        }
+        self.cache_status = if clear {
+            CacheStatus::Clearing
+        } else {
+            CacheStatus::Reading
+        };
+        let work = cx.background_spawn(async move {
+            let cache = sys::thumbnail_cache::ThumbnailCache::open()
+                .ok_or_else(|| std::io::Error::other("找不到缓存目录"))?;
+            if clear {
+                cache.clear()
+            } else {
+                cache.disk_usage()
+            }
+        });
+        cx.spawn(async move |preferences, cx| {
+            let result = work.await;
+            let _ = preferences.update(cx, |preferences, cx| {
+                preferences.cache_status = match result {
+                    Ok(bytes) => CacheStatus::Usage(bytes),
+                    Err(error) => CacheStatus::Failed(error.to_string()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cache_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let (description, error) = match &self.cache_status {
+            CacheStatus::Idle | CacheStatus::Reading => ("正在读取…".into(), false),
+            CacheStatus::Clearing => ("正在清理…".into(), false),
+            CacheStatus::Usage(bytes) => (super::file_area::format_size(*bytes), false),
+            CacheStatus::Failed(error) => (error.clone(), true),
+        };
+        let theme = cx.theme();
+        let detail_color = if error {
+            theme.danger
+        } else {
+            theme.muted_foreground
+        };
+        preference_row(
+            "ktfm 磁盘缩略图缓存",
+            h_flex()
+                .gap_3()
+                .child(div().text_sm().text_color(detail_color).child(description))
+                .child(
+                    Button::new("clear-thumbnail-cache")
+                        .label("清理缓存")
+                        .small()
+                        .disabled(matches!(
+                            self.cache_status,
+                            CacheStatus::Idle
+                                | CacheStatus::Reading
+                                | CacheStatus::Clearing
+                                | CacheStatus::Usage(0)
+                        ))
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.update_thumbnail_cache(true, cx)),
+                        ),
+                ),
+        )
+    }
+
     fn about_page(&self, cx: &gpui_kit::App) -> impl IntoElement + use<> {
         v_flex()
             .gap_3()
@@ -907,6 +1003,8 @@ impl Render for Preferences {
             Page::Behavior => self.behavior_page(cx).into_any_element(),
             Page::Terminal => self.terminal_page(cx).into_any_element(),
             Page::Shortcuts => self.shortcuts_page(cx).into_any_element(),
+            #[cfg(target_os = "linux")]
+            Page::Cache => self.cache_page(cx).into_any_element(),
             Page::About => self.about_page(cx).into_any_element(),
         };
 

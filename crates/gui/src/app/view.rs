@@ -35,6 +35,7 @@ use settings::config::general::StartupBehavior;
 pub struct App {
     pub(super) panes: Vec<BrowserPane>,
     pub(super) thumbnails: Thumbnails,
+    pub(super) recent_directories: super::browser::RecentDirectories,
     pub(super) pane_target: usize,
     pub(super) active_pane: usize,
     pub(super) pane_layout: PaneLayout,
@@ -207,6 +208,7 @@ impl App {
             file_properties: None,
             panes: vec![pane],
             thumbnails: Thumbnails::new(),
+            recent_directories: Default::default(),
             pane_target: 0,
             active_pane: 0,
             pane_layout: PaneLayout::default(),
@@ -255,7 +257,7 @@ impl App {
         )
         .detach();
         GeometrySaver::observe(window, cx);
-        app.load_directory(cx);
+        app.load_directory(window, cx);
         if persist_session
             && matches!(
                 cx.global::<ActivePreferences>().0.general.startup_behavior,

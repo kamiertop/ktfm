@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,14 +7,82 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 use settings::config::tab::Location;
-use settings::config::view::ViewMode;
 use vfs::{DirectoryWatch, Entry, EntryKind};
 
-use super::App;
+use super::{App, file_area::GridThumbnailPrefetch, thumbnails::ThumbnailKey};
 use crate::model::entry_appearance;
 use daemon::browse::{ChildCount, ChildCountMonitor, DirectorySnapshot, FileSort, ReadSource};
 
 const ESTIMATED_GRID_ROW_PADDING: Pixels = px(60.);
+
+const RECENT_DIRECTORY_AGE: Duration = Duration::from_secs(60);
+const RECENT_DIRECTORY_LIMIT: usize = 8;
+const RECENT_ENTRY_LIMIT: usize = 20_000;
+
+#[derive(Default)]
+pub(super) struct RecentDirectories(VecDeque<RecentDirectory>);
+
+struct RecentDirectory {
+    path: PathBuf,
+    last_seen: Instant,
+    snapshot: Arc<DirectorySnapshot>,
+    visible: Vec<usize>,
+    query: String,
+    show_hidden: bool,
+    sort: FileSort,
+}
+
+impl RecentDirectories {
+    fn get(
+        &mut self,
+        path: &Path,
+        browser: &Browser,
+    ) -> Option<(Arc<DirectorySnapshot>, Vec<usize>)> {
+        self.0
+            .retain(|entry| entry.last_seen.elapsed() < RECENT_DIRECTORY_AGE);
+        let index = self.0.iter().position(|entry| {
+            entry.path == path
+                && entry.query == browser.query
+                && entry.show_hidden == browser.show_hidden
+                && entry.sort == browser.sort
+        })?;
+        let entry = self.0.remove(index)?;
+        let result = (entry.snapshot.clone(), entry.visible.clone());
+        self.0.push_back(entry);
+        Some(result)
+    }
+
+    fn insert(&mut self, entry: RecentDirectory) {
+        self.0.retain(|cached| cached.path != entry.path);
+        if entry.snapshot.directory.entries.len() <= RECENT_ENTRY_LIMIT {
+            self.0.push_back(entry);
+        }
+        while self.0.len() > RECENT_DIRECTORY_LIMIT
+            || self
+                .0
+                .iter()
+                .map(|entry| entry.snapshot.directory.entries.len())
+                .sum::<usize>()
+                > RECENT_ENTRY_LIMIT
+        {
+            self.0.pop_front();
+        }
+    }
+
+    fn mark_recent(&mut self, snapshot: &Arc<DirectorySnapshot>) {
+        if let Some(entry) = self
+            .0
+            .iter_mut()
+            .find(|entry| Arc::ptr_eq(&entry.snapshot, snapshot))
+        {
+            entry.last_seen = Instant::now();
+        }
+    }
+
+    pub(super) fn remove_under(&mut self, root: &Path) {
+        self.0.retain(|entry| !entry.path.starts_with(root));
+    }
+}
 
 pub(super) enum DirectoryState {
     Unavailable,
@@ -566,7 +634,7 @@ impl App {
         });
     }
 
-    pub(super) fn load_directory(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn load_directory(&mut self, window: &Window, cx: &mut Context<Self>) {
         let source = self.read_source(cx);
         let tag_pending = matches!(source, Some(ReadSource::MissingTag))
             .then(|| self.tag_state.read(cx))
@@ -576,6 +644,12 @@ impl App {
                 None => DirectoryState::Loading { show_message: true },
             });
         let browser = &mut self.panes[self.pane_target].browser;
+        if browser.directory_watch.is_some()
+            && browser.read_task.is_none()
+            && let DirectoryState::Ready(snapshot) = &browser.state
+        {
+            self.recent_directories.mark_recent(snapshot);
+        }
         browser.snapshot_revision += 1;
         browser.stop_child_counts();
         browser.child_counts.clear();
@@ -605,9 +679,13 @@ impl App {
             show_message: false,
         };
         if let ReadSource::Directory(path) = &source {
+            if let Some((snapshot, visible)) = self.recent_directories.get(path, browser) {
+                self.replace_snapshot(snapshot, visible);
+            }
             self.watch_directory(path, cx);
         }
-        self.read_snapshot(source, cx);
+        let prefetch = self.grid_thumbnail_prefetch(window);
+        self.read_snapshot(source, prefetch, cx);
     }
 
     fn watch_directory(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -679,15 +757,29 @@ impl App {
         {
             self.watch_directory(path, cx);
         }
-        self.read_snapshot(source, cx);
+        self.read_snapshot(source, None, cx);
     }
 
-    fn read_snapshot(&mut self, source: ReadSource, cx: &mut Context<Self>) {
+    fn read_snapshot(
+        &mut self,
+        source: ReadSource,
+        prefetch: Option<GridThumbnailPrefetch>,
+        cx: &mut Context<Self>,
+    ) {
         let pane_id = self.panes[self.pane_target].id;
-        let cache_reader = (self.panes[self.pane_target].view_mode == ViewMode::Grid)
-            .then(|| self.thumbnails.cache_reader(cx.svg_renderer()))
-            .flatten();
-        let browser = &mut self.panes[self.pane_target].browser;
+        let directory_path = match &source {
+            ReadSource::Directory(path) => Some(path.clone()),
+            _ => None,
+        };
+        let pane = &mut self.panes[self.pane_target];
+        let browser = &mut pane.browser;
+        let prefetch = prefetch
+            .filter(|_| matches!(browser.state, DirectoryState::Loading { .. }))
+            .and_then(|layout| {
+                self.thumbnails
+                    .cache_reader(cx.svg_renderer())
+                    .map(|read| (layout, read))
+            });
         let snapshot_revision = browser.snapshot_revision;
         let show_loading_later = matches!(
             browser.state,
@@ -695,7 +787,7 @@ impl App {
                 show_message: false
             }
         );
-        let anchor_path = cache_reader.as_ref().and_then(|_| {
+        let anchor_path = prefetch.as_ref().and_then(|_| {
             browser
                 .tab_restore
                 .as_ref()
@@ -708,8 +800,8 @@ impl App {
         let query = browser.query.clone();
         let sort = browser.sort;
         let show_hidden = browser.show_hidden;
+        let executor = cx.background_executor().clone();
         let read = cx.background_spawn(async move {
-            let is_cancelled = || read_cancelled.load(Relaxed);
             let directory = DirectorySnapshot::read(source, &read_cancelled)?;
             let visible = directory.visible_entries(
                 &query,
@@ -719,23 +811,40 @@ impl App {
                 &read_cancelled,
             );
             let mut thumbnails = Vec::new();
-            if let Some(read_cache) = cache_reader {
+            if let Some((layout, read_cache)) = prefetch
+                && !read_cancelled.load(Relaxed)
+            {
                 let start = anchor_path
                     .as_ref()
                     .and_then(|path| directory.indices.get(path))
                     .and_then(|index| visible.iter().position(|entry| entry == index))
-                    .map_or(0, |position| position.saturating_sub(8));
-                let deadline = Instant::now() + Duration::from_millis(35);
-                for &index in visible.iter().skip(start).take(48) {
-                    if is_cancelled() || Instant::now() >= deadline {
-                        break;
-                    }
-                    let entry = &directory.directory.entries[index];
-                    if entry_appearance(entry.kind, &entry.path).2
-                        && let Some(image) = read_cache(&entry.path, 160)
-                    {
-                        thumbnails.push((index, image));
-                    }
+                    .map_or(0, |position| position / layout.columns * layout.columns);
+                let keys: Vec<_> = visible
+                    .iter()
+                    .skip(start)
+                    .take(layout.count)
+                    .map(|&index| &directory.directory.entries[index])
+                    .filter(|entry| entry_appearance(entry.kind, &entry.path).2)
+                    .map(|entry| ThumbnailKey::new(entry, pane_id, snapshot_revision + 1))
+                    .collect();
+                let read_cache = Arc::new(read_cache);
+                let device_size = layout.device_size;
+                let jobs: Vec<_> = keys
+                    .chunks(keys.len().div_ceil(8).max(1))
+                    .map(|keys| {
+                        let keys = keys.to_vec();
+                        let read = read_cache.clone();
+                        let cancelled = read_cancelled.clone();
+                        executor.spawn(async move {
+                            keys.into_iter()
+                                .take_while(|_| !cancelled.load(Relaxed))
+                                .filter_map(|key| read(&key, device_size).map(|image| (key, image)))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                for job in jobs {
+                    thumbnails.extend(job.await);
                 }
             }
             Ok::<_, std::io::Error>((directory, visible, query, thumbnails))
@@ -757,15 +866,21 @@ impl App {
                                 && show_hidden == this.panes[this.pane_target].browser.show_hidden
                                 && sort == this.panes[this.pane_target].browser.sort;
                             if filter_matches {
-                                this.replace_snapshot(directory, visible);
-                                let revision =
-                                    this.panes[this.pane_target].browser.snapshot_revision;
-                                for (index, image) in thumbnails {
-                                    this.thumbnails.seed_cached(
-                                        (pane_id, revision, index),
-                                        image,
-                                        cx,
-                                    );
+                                let snapshot = Arc::new(directory);
+                                if let Some(path) = directory_path {
+                                    this.recent_directories.insert(RecentDirectory {
+                                        path,
+                                        last_seen: Instant::now(),
+                                        snapshot: snapshot.clone(),
+                                        visible: visible.clone(),
+                                        query,
+                                        show_hidden,
+                                        sort,
+                                    });
+                                }
+                                this.replace_snapshot(snapshot, visible);
+                                for (key, image) in thumbnails {
+                                    this.thumbnails.seed_cached(key, image, cx);
                                 }
                             } else if matches!(
                                 this.panes[this.pane_target].browser.state,
@@ -780,6 +895,9 @@ impl App {
                             }
                         }
                         Err(error) => {
+                            if let Some(path) = directory_path {
+                                this.recent_directories.remove_under(&path);
+                            }
                             let browser = &mut this.panes[this.pane_target].browser;
                             browser.snapshot_revision += 1;
                             browser.stop_child_counts();
@@ -823,14 +941,14 @@ impl App {
         cx.notify();
     }
 
-    fn replace_snapshot(&mut self, snapshot: DirectorySnapshot, visible: Vec<usize>) {
+    fn replace_snapshot(&mut self, snapshot: Arc<DirectorySnapshot>, visible: Vec<usize>) {
         let browser = &mut self.panes[self.pane_target].browser;
         // 刷新时按路径保留滚动锚点，文件插入或移除后仍能回到附近。
         let scroll = browser.scroll_anchor();
         browser.snapshot_revision += 1;
         browser.filter_task = None;
         browser.filtering = false;
-        browser.state = DirectoryState::Ready(Arc::new(snapshot));
+        browser.state = DirectoryState::Ready(snapshot);
         browser.stop_child_counts();
         browser.child_counts.clear();
         browser.visible = visible;
@@ -1049,8 +1167,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use gpui_kit::Modifiers;
+    use std::{path::Path, sync::Arc, time::Instant};
 
-    use super::Browser;
+    use super::{
+        Browser, DirectoryState, RECENT_DIRECTORY_AGE, RecentDirectories, RecentDirectory,
+    };
     use vfs::{Directory, Entry, EntryKind};
 
     fn browser_with_entries() -> Browser {
@@ -1083,6 +1204,35 @@ mod tests {
             .selected_entries()
             .map(|entry| entry.name.to_str().unwrap())
             .collect()
+    }
+
+    #[test]
+    fn reuses_recent_directory_only_with_matching_view_and_fresh_snapshot() {
+        let mut browser = browser_with_entries();
+        let DirectoryState::Ready(snapshot) = &browser.state else {
+            panic!("测试目录应已加载");
+        };
+        let snapshot = snapshot.clone();
+        let path = Path::new("/mnt/pictures");
+        let mut cache = RecentDirectories::default();
+        cache.insert(RecentDirectory {
+            path: path.to_owned(),
+            last_seen: Instant::now(),
+            snapshot: snapshot.clone(),
+            visible: browser.visible.clone(),
+            query: browser.query.clone(),
+            show_hidden: browser.show_hidden,
+            sort: browser.sort,
+        });
+
+        let (cached, visible) = cache.get(path, &browser).unwrap();
+        assert!(Arc::ptr_eq(&cached, &snapshot));
+        assert_eq!(visible, browser.visible);
+        browser.show_hidden = true;
+        assert!(cache.get(path, &browser).is_none());
+        browser.show_hidden = false;
+        cache.0.back_mut().unwrap().last_seen -= RECENT_DIRECTORY_AGE;
+        assert!(cache.get(path, &browser).is_none());
     }
 
     #[test]

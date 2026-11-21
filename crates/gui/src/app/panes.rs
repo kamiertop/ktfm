@@ -181,7 +181,7 @@ impl App {
         let pane = BrowserPane::new(vec![tab], 0, window, cx);
         self.panes.insert(index, pane);
         self.select_pane(index);
-        self.load_directory(cx);
+        self.load_directory(window, cx);
         window.focus(&self.focus, cx);
         self.save_workspace(cx);
     }
@@ -225,7 +225,7 @@ impl App {
             .map(|pane| pane.id)
             .collect();
         for id in inactive {
-            self.with_pane(id, |app| app.load_directory(cx));
+            self.with_pane(id, |app| app.load_directory(window, cx));
         }
         self.select_pane(grid.active_index.min(self.panes.len() - 1));
     }
@@ -361,6 +361,22 @@ impl App {
 
     fn neighbor(&self, layout: SplitLayout, forward: bool) -> Option<usize> {
         self.pane_layout.neighbor(self.active_pane, layout, forward)
+    }
+
+    pub(super) fn browser_pane_viewport(&self, window: &Window) -> Size<Pixels> {
+        if self.panes.len() > 1
+            && let Some(size) = self.pane().measured_size
+        {
+            return size;
+        }
+        let viewport = window.viewport_size();
+        let bounds = window.bounds().size;
+        let width = viewport.width.max(bounds.width);
+        let height = viewport.height.max(bounds.height);
+        size(
+            (width - SIDEBAR_WIDTH).max(px(0.)),
+            (height - TITLE_BAR_HEIGHT).max(px(0.)),
+        )
     }
 
     pub(super) fn browser_panes(

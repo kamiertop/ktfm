@@ -59,6 +59,12 @@ pub(super) fn format_size(bytes: u64) -> String {
     format!("{value:.1} {unit}")
 }
 
+pub(super) struct GridThumbnailPrefetch {
+    pub(super) columns: usize,
+    pub(super) count: usize,
+    pub(super) device_size: u16,
+}
+
 #[derive(Clone, Copy)]
 struct FileLayout {
     grid: bool,
@@ -96,6 +102,12 @@ impl FileLayout {
             slot_width,
             columns,
         }
+    }
+
+    fn prefetch_count(self, height: Pixels) -> usize {
+        let rows = (height / (self.row_height() + GRID_GAP)).ceil() as usize;
+        // 向上取整并多预读一行，覆盖视口底部不完整的网格行。
+        (rows + 1).saturating_mul(self.columns).clamp(1, 256)
     }
 
     fn row_height(self) -> Pixels {
@@ -176,6 +188,21 @@ impl App {
         if steps != 0 {
             self.zoom_file_view(steps, cx);
         }
+    }
+
+    pub(super) fn grid_thumbnail_prefetch(&self, window: &Window) -> Option<GridThumbnailPrefetch> {
+        let pane = self.pane();
+        if pane.view_mode != ViewMode::Grid {
+            return None;
+        }
+        let viewport = self.browser_pane_viewport(window);
+        let layout = FileLayout::new(pane.view_mode, pane.zoom_step, viewport.width);
+        let device_size = (f32::from(layout.icon_size) * window.scale_factor()).ceil() as u16;
+        Some(GridThumbnailPrefetch {
+            columns: layout.columns,
+            count: layout.prefetch_count(viewport.height),
+            device_size,
+        })
     }
 
     pub(super) fn file_area(
@@ -763,8 +790,7 @@ impl App {
         let thumbnail = if previewable {
             let device_size = (f32::from(icon_size) * window.scale_factor()).ceil() as u16;
             self.thumbnails.get_or_request(
-                (pane_id, snapshot_revision, index),
-                &file.path,
+                super::thumbnails::ThumbnailKey::new(file, pane_id, snapshot_revision),
                 device_size,
                 cx,
             )
@@ -906,6 +932,15 @@ mod tests {
         assert!(wider.slot_width > first.slot_width);
         let used = wider.slot_width * wider.columns + GRID_GAP * (wider.columns - 1);
         assert!((used - (px(780.) - GRID_MARGIN * 2.)).as_f32().abs() < 0.01);
+    }
+
+    #[test]
+    fn thumbnail_prefetch_covers_more_than_48_items_in_a_dense_grid() {
+        let dense = FileLayout::new(ViewMode::Grid, i8::MIN, px(1440.));
+        let large = FileLayout::new(ViewMode::Grid, i8::MAX, px(1440.));
+        assert!(dense.prefetch_count(px(900.)) > 48);
+        assert!(large.prefetch_count(px(900.)) < 48);
+        assert_eq!(dense.prefetch_count(px(5000.)), 256);
     }
 
     #[test]
