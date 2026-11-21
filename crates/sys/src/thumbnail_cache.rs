@@ -337,6 +337,67 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::time::Duration;
 
+    // 复现应用真实链路：ffmpeg 实际输出的 PNG → save_normal → 模拟重启后 load。
+    // 同时覆盖 jpg：jpg/jpeg 按扩展名被 image2 解复用器认领，曾因白名单缺失而全部失败。
+    #[test]
+    fn round_trips_a_real_ffmpeg_thumbnail_across_restart() {
+        let ffmpeg = std::path::Path::new("/usr/bin/ffmpeg");
+        let probe = std::process::Command::new(ffmpeg)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if !probe.is_ok_and(|status| status.success()) {
+            // 无 ffmpeg 的环境跳过。
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = ThumbnailCache {
+            private: root.path().join("ktfm/thumbnails"),
+            shared: root.path().join("thumbnails"),
+        };
+        let photo = root.path().join("photo.jpg");
+        let created = std::process::Command::new(ffmpeg)
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x480:duration=0.04",
+                "-frames:v",
+                "1",
+                "-y",
+            ])
+            .arg(&photo)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "生成测试图片失败");
+        assert!(photo.metadata().unwrap().len() > 0);
+
+        // jpg 曾因探测为 image2 被白名单拒绝，导致照片缩略图永远生成失败。
+        let bytes = crate::media::thumbnail(ffmpeg, &photo).expect("ffmpeg 应能生成 jpg 缩略图");
+        let source = cache.source(&photo).expect("应能建立源");
+        assert!(
+            cache.save_normal(&source, &bytes).is_some(),
+            "save_normal 应接受 ffmpeg 输出并落盘"
+        );
+
+        // 模拟重启：全新实例、仅凭文件元数据加载。
+        let cache = ThumbnailCache {
+            private: root.path().join("ktfm/thumbnails"),
+            shared: root.path().join("thumbnails"),
+        };
+        let metadata = fs::metadata(&photo).unwrap();
+        let source = cache
+            .source_with_metadata(&photo, metadata.modified().unwrap(), metadata.len())
+            .unwrap();
+        let loaded = cache.load(&source, 64).expect("重启后应命中磁盘缓存");
+        // save_normal 会重编码并嵌入元数据，字节不等于原始输出，只验证是有效 PNG。
+        assert!(loaded.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+
     #[test]
     fn trims_oldest_private_entries_and_clears_without_touching_shared_cache() {
         let root = tempfile::tempdir().unwrap();

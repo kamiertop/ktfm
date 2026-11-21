@@ -9,7 +9,9 @@ const OUTPUT_LIMIT: u64 = 128 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const FORMATS: &str = concat!(
     "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,asf,flv,mpeg,mpegts,",
-    "mp3,flac,ogg,wav,aac,aiff,jpeg_pipe,png_pipe,webp_pipe,gif,gif_pipe,bmp_pipe,tiff_pipe"
+    "mp3,flac,ogg,wav,aac,aiff,jpeg_pipe,png_pipe,webp_pipe,gif,gif_pipe,bmp_pipe,tiff_pipe,",
+    // jpg/jpeg 文件按扩展名被 image2 解复用器认领，jpeg_pipe 只在管道输入时才会被探测。
+    "image2"
 );
 
 /// 从本地媒体提取首个画面或内嵌封面，输出尺寸受限的 PNG。
