@@ -5,10 +5,14 @@ use std::process::Command;
 
 use super::{Volume, VolumeSource};
 
-pub(super) fn volumes() -> Vec<Volume> {
+pub(super) fn volumes() -> io::Result<Vec<Volume>> {
     // 枚举在独立的 GIO 进程内执行，让 GVfs 的卷监视器在该进程主线程初始化。
-    let list = run(&["mount", "--list", "--detail"]).unwrap_or_default();
     let mut mounted_paths = fuse_mounts();
+    let list = match run(&["mount", "--list", "--detail"]) {
+        Ok(list) => list,
+        Err(error) if mounted_paths.is_empty() => return Err(error),
+        Err(_) => String::new(),
+    };
     let mut volumes: Vec<_> = parse_volumes(&list)
         .into_iter()
         .map(|(uri, (label, mounted))| {
@@ -31,7 +35,7 @@ pub(super) fn volumes() -> Vec<Volume> {
             .replace('_', " ");
         phone_volume(uri, label, true, Some(path))
     }));
-    volumes
+    Ok(volumes)
 }
 
 fn phone_volume(uri: String, label: String, mounted: bool, mountpoint: Option<PathBuf>) -> Volume {

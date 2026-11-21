@@ -3,7 +3,7 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VolumeSource {
     Block(PathBuf),
     Phone(String),
@@ -101,7 +101,7 @@ mod linux {
         children: Vec<BlockDevice>,
     }
 
-    pub fn volumes() -> io::Result<Vec<Volume>> {
+    pub fn block_volumes() -> io::Result<Vec<Volume>> {
         let output = Command::new("lsblk")
             .args([
                 "--json",
@@ -117,11 +117,11 @@ mod linux {
             ));
         }
 
-        let mut volumes = parse_volumes(&output.stdout)?;
-        volumes.extend(phones::volumes());
-        volumes.sort_by(|left, right| left.label.cmp(&right.label));
-        refresh_usage(&mut volumes);
-        Ok(volumes)
+        parse_volumes(&output.stdout)
+    }
+
+    pub fn phone_volumes() -> io::Result<Vec<Volume>> {
+        phones::volumes()
     }
 
     pub fn refresh_usage(volumes: &mut [Volume]) {
@@ -409,7 +409,8 @@ mod linux {
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    is_authentication_dismissed, mount, refresh_usage, unlock_and_mount, unmount, volumes,
+    block_volumes, is_authentication_dismissed, mount, phone_volumes, refresh_usage,
+    unlock_and_mount, unmount,
 };
 
 #[cfg(not(target_os = "linux"))]
@@ -421,7 +422,12 @@ pub fn is_authentication_dismissed(_: &io::Error) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn volumes() -> io::Result<Vec<Volume>> {
+pub fn block_volumes() -> io::Result<Vec<Volume>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn phone_volumes() -> io::Result<Vec<Volume>> {
     Ok(Vec::new())
 }
 

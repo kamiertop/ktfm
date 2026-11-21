@@ -163,16 +163,7 @@ impl App {
             let owner = entity.clone();
             row.cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    let volume = this
-                        .storage
-                        .read(cx)
-                        .volumes
-                        .iter()
-                        .find(|volume| volume.source == open_source)
-                        .cloned();
-                    if let Some(volume) = volume {
-                        this.open_volume(&volume, window, cx);
-                    }
+                    this.open_volume(&open_source, window, cx);
                 }))
                 .context_menu(move |menu, _, cx| {
                     let Some(app) = owner.upgrade() else {
@@ -242,14 +233,14 @@ impl App {
             .when(
                 !storage.volumes.is_empty()
                     || storage.error.is_some()
-                    || storage.discovery_error.is_some(),
+                    || storage.discovery_error().is_some(),
                 |content| {
                     content.child(
                         section(cx).children(volumes).when_some(
                             storage
                                 .error
                                 .clone()
-                                .or_else(|| storage.discovery_error.clone()),
+                                .or_else(|| storage.discovery_error().cloned()),
                             |group, message| {
                                 group
                                     .child(div().px_1().text_sm().text_color(danger).child(message))

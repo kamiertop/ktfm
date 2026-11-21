@@ -416,6 +416,23 @@ impl App {
         cx.notify();
     }
 
+    pub(super) fn close_file_name_on_mount(
+        &mut self,
+        mountpoint: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_name_editor.as_ref().is_some_and(|editor| {
+            let path = match &editor.target {
+                NameTarget::Create { parent, .. } => parent,
+                NameTarget::Rename(source) => source,
+            };
+            path.starts_with(mountpoint)
+        }) {
+            self.close_file_name(window, cx);
+        }
+    }
+
     fn submit_file_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_job.is_some() {
             return;
@@ -701,29 +718,7 @@ impl App {
                             })
                     })
             }
-            PropertiesTarget::Volume(volume) => {
-                let status = if volume.locked {
-                    "已锁定"
-                } else if volume.mounted {
-                    "已挂载"
-                } else {
-                    "未挂载"
-                };
-                details
-                    .child(format!("名称　{}", volume.label))
-                    .child(format!("设备　{}", volume.source))
-                    .child(format!("状态　{status}"))
-                    .when_some(volume.mountpoint.as_ref(), |details, path| {
-                        details.child(format!("挂载点　{}", path.display()))
-                    })
-                    .when_some(
-                        volume.usage.map(|usage| usage.total).or(volume.capacity),
-                        |details, total| details.child(format!("容量　{}", format_size(total))),
-                    )
-                    .when_some(volume.usage, |details, usage| {
-                        details.child(format!("已用　{}", format_size(usage.used)))
-                    })
-            }
+            PropertiesTarget::Volume(volume) => super::volumes::volume_details(details, volume),
         };
         Some(
             Dialog::new(cx)

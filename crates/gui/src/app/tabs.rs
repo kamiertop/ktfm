@@ -48,6 +48,25 @@ impl BrowserTab {
         self.history.push(location);
         self.index = self.history.len() - 1;
     }
+
+    fn remove_mount_locations(&mut self, mountpoint: &Path, destination: &Path) -> bool {
+        let is_on_mount = |location: &Location| matches!(location, Location::Directory { path } if path.0.starts_with(mountpoint));
+        let current_removed = self.location().is_some_and(is_on_mount);
+        let index = self
+            .history
+            .iter()
+            .take(self.index)
+            .filter(|location| !is_on_mount(location))
+            .count();
+        self.history.retain(|location| !is_on_mount(location));
+        self.index = index;
+        if current_removed {
+            self.history
+                .insert(index, Location::directory(destination.to_owned()));
+            self.browse_state = None;
+        }
+        current_removed
+    }
 }
 
 pub(super) fn restore_tabs(
@@ -93,6 +112,39 @@ pub(super) fn restore_tab_items(
 }
 
 impl App {
+    pub(super) fn leave_unmounted_volume(
+        &mut self,
+        mountpoint: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_file_name_on_mount(mountpoint, window, cx);
+        let destination = self
+            .home()
+            .filter(|home| !home.starts_with(mountpoint))
+            .unwrap_or_else(|| Path::new("/"))
+            .to_owned();
+        let mut reloaded = Vec::new();
+        let mut session_changed = false;
+        for pane in &mut self.panes {
+            for (index, tab) in pane.tabs.iter_mut().enumerate() {
+                if tab.remove_mount_locations(mountpoint, &destination) {
+                    session_changed = true;
+                    if index == pane.active_tab {
+                        reloaded.push(pane.id);
+                    }
+                }
+            }
+        }
+        if reloaded.is_empty() && session_changed {
+            self.save_workspace(cx);
+        }
+        for pane in reloaded {
+            self.with_pane(pane, |app| app.location_changed(window, cx));
+        }
+        cx.notify();
+    }
+
     pub(super) fn current_location(&self) -> Option<&Location> {
         self.panes[self.pane_target].tabs[self.panes[self.pane_target].active_tab].location()
     }
@@ -590,6 +642,37 @@ fn tab_outline(active: usize, count: usize, outline: Rgba, divider: Hsla) -> imp
 #[cfg(test)]
 mod tests {
     use super::{BrowserTab, Location, TabItem, Tag, Uuid, Workspace, restore_tabs};
+    use std::path::Path;
+
+    #[test]
+    fn an_unmounted_directory_is_replaced_without_losing_other_history() {
+        let home = Location::directory("/home".into());
+        let fallback = Location::directory("/home/user".into());
+        let mut tab = BrowserTab::new(Uuid::new_v4(), Some(home.clone()));
+        tab.visit(Location::directory("/mnt/disk".into()));
+        tab.visit(Location::directory("/mnt/disk/subdir".into()));
+        let neighbour = Location::directory("/mnt/disk-backup".into());
+        tab.visit(neighbour.clone());
+        tab.index = 2;
+
+        assert!(tab.remove_mount_locations(Path::new("/mnt/disk"), Path::new("/home/user")));
+        assert_eq!(tab.location(), Some(&fallback));
+        assert_eq!(tab.history, vec![home, fallback, neighbour]);
+    }
+
+    #[test]
+    fn removing_an_older_mount_entry_keeps_the_current_location() {
+        let mut tab = BrowserTab::new(
+            Uuid::new_v4(),
+            Some(Location::directory("/mnt/disk".into())),
+        );
+        let current = Location::directory("/tmp".into());
+        tab.visit(current.clone());
+
+        assert!(!tab.remove_mount_locations(Path::new("/mnt/disk"), Path::new("/home")));
+        assert_eq!(tab.location(), Some(&current));
+        assert_eq!(tab.history, vec![current]);
+    }
 
     #[test]
     fn restores_valid_tabs_and_falls_back_when_the_active_tag_is_missing() {
