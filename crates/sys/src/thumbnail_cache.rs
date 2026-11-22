@@ -347,7 +347,7 @@ fn png_software_is_ours(path: &Path) -> bool {
         return false;
     };
     buffer.truncate(read);
-    if buffer.get(..8) != Some(&PNG_SIGNATURE) {
+    if buffer.first_chunk::<8>() != Some(&PNG_SIGNATURE) {
         return false;
     }
     let mut pos = 8;
@@ -373,8 +373,8 @@ fn png_software_is_ours(path: &Path) -> bool {
 
 /// 读取位置处的 PNG 块长度；越界或长度异常返回 None。
 fn chunk_length(buffer: &[u8], pos: usize) -> Option<usize> {
-    let header = buffer.get(pos..pos + 8)?;
-    let length = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+    let header: &[u8; 8] = buffer.get(pos..)?.first_chunk()?;
+    let length = u32::from_be_bytes(*header.first_chunk::<4>()?) as usize;
     (pos + 8 + length + 4 <= buffer.len()).then_some(length)
 }
 
