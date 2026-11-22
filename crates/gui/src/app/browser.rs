@@ -104,12 +104,25 @@ impl Drop for ReadTask {
 pub(super) struct TabBrowseState {
     pub(super) search: String,
     selection: Selection,
-    scroll: Option<ScrollAnchor>,
+    pub(super) scroll: Option<ScrollAnchor>,
 }
 
-struct ScrollAnchor {
-    path: PathBuf,
-    position: usize,
+impl TabBrowseState {
+    /// 历史导航返回时只需要恢复滚动位置。
+    pub(super) fn from_scroll(scroll: ScrollAnchor) -> Self {
+        Self {
+            search: String::new(),
+            selection: Selection::default(),
+            scroll: Some(scroll),
+        }
+    }
+}
+
+/// 按可见条目路径记录的滚动锚点，文件增删后仍能回到附近。
+#[derive(Clone)]
+pub(super) struct ScrollAnchor {
+    pub(super) path: PathBuf,
+    pub(super) position: usize,
 }
 
 #[derive(PartialEq)]
@@ -329,7 +342,7 @@ impl Browser {
         }
     }
 
-    fn scroll_anchor(&self) -> Option<ScrollAnchor> {
+    pub(super) fn scroll_anchor(&self) -> Option<ScrollAnchor> {
         let position = self.restore_row.unwrap_or_else(|| {
             if let Some(layout) = &self.grid_layout {
                 return self.grid_scroll.logical_scroll_top().item_ix * layout.columns;

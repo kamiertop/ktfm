@@ -20,11 +20,17 @@ use crate::components::{icon_button, truncated_text, with_tooltip};
 const TAB_BAR_PADDING: Pixels = px(8.);
 const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
 
+/// 历史条目：位置 + 离开该位置时的滚动锚点，返回时恢复。
+struct HistoryEntry {
+    location: Location,
+    scroll: Option<super::browser::ScrollAnchor>,
+}
+
 pub(super) struct BrowserTab {
     pub(super) id: Uuid,
     pub(super) terminal: super::embed_terminal::TabTerminal,
     browse_state: Option<TabBrowseState>,
-    history: Vec<Location>,
+    history: Vec<HistoryEntry>,
     index: usize,
 }
 
@@ -34,18 +40,27 @@ impl BrowserTab {
             id,
             terminal: Default::default(),
             browse_state: None,
-            history: location.into_iter().collect(),
+            history: location
+                .into_iter()
+                .map(|location| HistoryEntry {
+                    location,
+                    scroll: None,
+                })
+                .collect(),
             index: 0,
         }
     }
 
     fn location(&self) -> Option<&Location> {
-        self.history.get(self.index)
+        self.history.get(self.index).map(|entry| &entry.location)
     }
 
     fn visit(&mut self, location: Location) {
         self.history.truncate(self.index + 1);
-        self.history.push(location);
+        self.history.push(HistoryEntry {
+            location,
+            scroll: None,
+        });
         self.index = self.history.len() - 1;
     }
 
@@ -56,13 +71,18 @@ impl BrowserTab {
             .history
             .iter()
             .take(self.index)
-            .filter(|location| !is_on_mount(location))
+            .filter(|entry| !is_on_mount(&entry.location))
             .count();
-        self.history.retain(|location| !is_on_mount(location));
+        self.history.retain(|entry| !is_on_mount(&entry.location));
         self.index = index;
         if current_removed {
-            self.history
-                .insert(index, Location::directory(destination.to_owned()));
+            self.history.insert(
+                index,
+                HistoryEntry {
+                    location: Location::directory(destination.to_owned()),
+                    scroll: None,
+                },
+            );
             self.browse_state = None;
         }
         current_removed
@@ -141,7 +161,7 @@ impl App {
             self.save_workspace(cx);
         }
         for pane in reloaded {
-            self.with_pane(pane, |app| app.location_changed(window, cx));
+            self.with_pane(pane, |app| app.location_changed(None, window, cx));
         }
         cx.notify();
     }
@@ -187,9 +207,10 @@ impl App {
         if self.current_location() == Some(&location) {
             return;
         }
+        self.remember_history_scroll();
         let pane = &mut self.panes[self.pane_target];
         pane.tabs[pane.active_tab].visit(location);
-        self.location_changed(window, cx);
+        self.location_changed(None, window, cx);
     }
 
     pub(super) fn can_go_back(&self) -> bool {
@@ -204,17 +225,34 @@ impl App {
 
     pub(super) fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_go_back() {
+            self.remember_history_scroll();
             let pane = &mut self.panes[self.pane_target];
-            pane.tabs[pane.active_tab].index -= 1;
-            self.location_changed(window, cx);
+            let tab = &mut pane.tabs[pane.active_tab];
+            tab.index -= 1;
+            let scroll = tab.history[tab.index].scroll.clone();
+            self.location_changed(scroll, window, cx);
         }
     }
 
     pub(super) fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.can_go_forward() {
+            self.remember_history_scroll();
             let pane = &mut self.panes[self.pane_target];
-            pane.tabs[pane.active_tab].index += 1;
-            self.location_changed(window, cx);
+            let tab = &mut pane.tabs[pane.active_tab];
+            tab.index += 1;
+            let scroll = tab.history[tab.index].scroll.clone();
+            self.location_changed(scroll, window, cx);
+        }
+    }
+
+    /// 离开当前位置前，把滚动锚点存进对应的历史条目。
+    fn remember_history_scroll(&mut self) {
+        let pane = &mut self.panes[self.pane_target];
+        let anchor = pane.browser.scroll_anchor();
+        if let Some(tab) = pane.tabs.get_mut(pane.active_tab)
+            && let Some(entry) = tab.history.get_mut(tab.index)
+        {
+            entry.scroll = anchor;
         }
     }
 
@@ -280,6 +318,7 @@ impl App {
             .tabs
             .iter()
             .flat_map(|tab| &tab.history)
+            .map(|entry| &entry.location)
             .filter_map(|location| match location {
                 Location::Tag { id } if tags.get(*id).is_none() => Some(*id),
                 _ => None,
@@ -308,16 +347,20 @@ impl App {
             }
             let before = tab.history[..tab.index]
                 .iter()
-                .filter(|item| !removed(item))
+                .filter(|entry| !removed(&entry.location))
                 .count();
-            tab.history.retain(|item| !removed(item));
+            tab.history.retain(|entry| !removed(&entry.location));
             if tab.history.is_empty() {
-                tab.history.extend(home.clone());
+                tab.history
+                    .extend(home.clone().map(|location| HistoryEntry {
+                        location,
+                        scroll: None,
+                    }));
             }
             tab.index = before.min(tab.history.len().saturating_sub(1));
         }
         if was_active {
-            self.location_changed(window, cx);
+            self.location_changed(None, window, cx);
         } else {
             self.save_workspace(cx);
         }
@@ -349,16 +392,22 @@ impl App {
     fn activate_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = &mut self.panes[self.pane_target];
         let saved = pane.tabs[pane.active_tab].browse_state.take();
-        self.change_browser_location(saved, window, cx);
+        self.change_browser_location(saved, None, window, cx);
     }
 
-    fn location_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.change_browser_location(None, window, cx);
+    fn location_changed(
+        &mut self,
+        scroll: Option<super::browser::ScrollAnchor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_browser_location(None, scroll, window, cx);
     }
 
     fn change_browser_location(
         &mut self,
         saved: Option<TabBrowseState>,
+        scroll: Option<super::browser::ScrollAnchor>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -369,7 +418,15 @@ impl App {
         self.panes[self.pane_target].search.update(cx, |input, cx| {
             input.set_value(search, window, cx);
         });
-        self.panes[self.pane_target].browser.tab_restore = saved;
+        self.panes[self.pane_target].browser.tab_restore = match (saved, scroll) {
+            // 标签页切换的完整状态优先；历史导航只恢复滚动位置。
+            (Some(mut state), scroll) => {
+                state.scroll = state.scroll.or(scroll);
+                Some(state)
+            }
+            (None, Some(scroll)) => Some(TabBrowseState::from_scroll(scroll)),
+            (None, None) => None,
+        };
         self.load_directory(window, cx);
         self.save_workspace(cx);
     }
@@ -658,7 +715,8 @@ mod tests {
 
         assert!(tab.remove_mount_locations(Path::new("/mnt/disk"), Path::new("/home/user")));
         assert_eq!(tab.location(), Some(&fallback));
-        assert_eq!(tab.history, vec![home, fallback, neighbour]);
+        let locations: Vec<_> = tab.history.iter().map(|entry| &entry.location).collect();
+        assert_eq!(locations, vec![&home, &fallback, &neighbour]);
     }
 
     #[test]
@@ -672,7 +730,8 @@ mod tests {
 
         assert!(!tab.remove_mount_locations(Path::new("/mnt/disk"), Path::new("/home")));
         assert_eq!(tab.location(), Some(&current));
-        assert_eq!(tab.history, vec![current]);
+        let locations: Vec<_> = tab.history.iter().map(|entry| &entry.location).collect();
+        assert_eq!(locations, vec![&current]);
     }
 
     #[test]
