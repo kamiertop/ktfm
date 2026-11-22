@@ -112,6 +112,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bundled_config_format_icons_match_and_render() {
+        let renderer = gpui_kit::SvgRenderer::new(std::sync::Arc::new(()));
+        for (name, icon) in [
+            ("a.json", "json.svg"),
+            ("settings.ini", "ini.svg"),
+            ("compose.yaml", "yaml.svg"),
+            ("compose.yml", "yml.svg"),
+        ] {
+            let matched = file_icon_overrides(OsStr::new(name), None);
+            assert_eq!(
+                matched,
+                [IconOverride::Bundled(icon.into())],
+                "{name} 应命中自带图标"
+            );
+            let (extension, bytes) = matched[0].load().expect("图标应可加载");
+            assert_eq!(extension, "svg");
+            renderer
+                .parse_svg(&bytes)
+                .unwrap_or_else(|error| panic!("{icon} 解析失败: {error}"));
+        }
+    }
+
+    #[test]
     fn overrides_match_compound_extensions_before_shorter_extensions_and_mime() {
         let custom = IconOverride::User("tar.zst.svg".into());
         let short = IconOverride::User("zst.png".into());
