@@ -4,11 +4,15 @@
 //! 未命中且未失败标记的再交给 ffmpeg 生成并落盘，结果回填内存后触发重绘。
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use gpui_kit::{AppContext, Context, Image, ImageFormat, RenderImage, SvgRenderer};
+use gpui_kit::{
+    AppContext, Context, DevicePixels, Image, ImageFormat, RenderImage, SvgRenderer, SvgSize,
+};
 use vfs::Entry;
 
 use super::App;
@@ -17,12 +21,32 @@ use super::App;
 const MAX_READS: usize = 32;
 /// ffmpeg 进程开销大，生成并发保持克制。
 const MAX_GENERATIONS: usize = 8;
+/// SVG 源文件读取上限，避免超大文件拖垮解析。
+const MAX_SVG_BYTES: u64 = 2 * 1024 * 1024;
 const CACHE_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 const CACHE_RECORD_LIMIT: usize = 2048;
 
 fn decode(bytes: Vec<u8>, renderer: &SvgRenderer) -> Option<Arc<RenderImage>> {
     Image::from_bytes(ImageFormat::Png, bytes)
         .to_image_data(renderer.clone())
+        .ok()
+}
+
+/// 读取受限大小的 SVG 并按请求尺寸光栅化，保持纵横比。
+fn render_svg(path: &Path, device_size: u16, renderer: &SvgRenderer) -> Option<Arc<RenderImage>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(MAX_SVG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SVG_BYTES {
+        return None;
+    }
+    let side = DevicePixels(i32::from(device_size.max(1)));
+    let svg = renderer.parse_svg(&bytes).ok()?;
+    renderer
+        .render_parsed(&svg, SvgSize::Size(gpui_kit::size(side, side)))
         .ok()
 }
 
@@ -168,19 +192,28 @@ impl Thumbnails {
             return None;
         }
         self.pending.insert(key.clone());
-        let Some(disk) = self.disk.clone() else {
-            // 没有可查的磁盘缓存，直接排队生成。
-            self.backlog.push_back(key);
-            self.pump(cx);
-            return None;
-        };
         self.reads += 1;
         let path = key.path.clone();
         let renderer = cx.svg_renderer();
         let job_key = key.clone();
+        // SVG 原生渲染：解析快、任意尺寸清晰，不走 ffmpeg 也不落盘。
+        let svg = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"));
+        let disk = self.disk.clone();
         let job = cx.background_spawn(async move {
+            if svg {
+                // 解析失败会话内不重试，下次启动重试的成本也只有毫秒级。
+                return Some(
+                    render_svg(&path, device_size, &renderer)
+                        .map_or(ThumbnailState::Failed, ThumbnailState::Ready),
+                );
+            }
             // 等待期间其他窗口或程序可能已生成缩略图，先查共享缓存。
-            if let Some(source) = disk.source_with_metadata(&path, job_key.modified, job_key.size) {
+            if let Some(disk) = disk.as_ref()
+                && let Some(source) =
+                    disk.source_with_metadata(&path, job_key.modified, job_key.size)
+            {
                 match disk.load(&source, device_size) {
                     sys::thumbnail_cache::LoadResult::Thumbnail(bytes) => {
                         if let Some(image) = decode(bytes, &renderer) {
@@ -281,7 +314,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
 
-    use gpui_kit::SvgRenderer;
+    use gpui_kit::{DevicePixels, SvgRenderer};
     use vfs::{Entry, EntryKind};
 
     use super::{ThumbnailKey, ThumbnailMemory, ThumbnailState, decode};
@@ -316,6 +349,38 @@ mod tests {
         assert!(memory.get(&keys[0]).is_some());
         assert!(memory.get(&keys[1]).is_none());
         assert!(memory.get(&keys[2]).is_some());
+    }
+
+    #[test]
+    fn renders_svg_files_at_the_requested_size() {
+        use std::io::Write as _;
+
+        let renderer = SvgRenderer::new(Arc::new(()));
+        let root = std::env::temp_dir().join(format!("ktfm-test-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let svg = root.join("vector.svg");
+        std::fs::File::create(&svg)
+            .unwrap()
+            .write_all(
+                br##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+                    <rect width="64" height="32" fill="#336699"/>
+                </svg>"##,
+            )
+            .unwrap();
+        let image = super::render_svg(&svg, 96, &renderer).expect("应能渲染 SVG");
+        // 保持纵横比：宽为请求尺寸，高按 2:1 缩小。
+        assert_eq!(
+            image.size(0),
+            gpui_kit::size(DevicePixels(96), DevicePixels(48))
+        );
+
+        let broken = root.join("broken.svg");
+        std::fs::File::create(&broken)
+            .unwrap()
+            .write_all(b"<svg xmlns=\"http://www.w3.org/2000/svg\"")
+            .unwrap();
+        assert!(super::render_svg(&broken, 96, &renderer).is_none());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

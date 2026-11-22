@@ -76,10 +76,9 @@ pub fn file_type(kind: EntryKind, path: &Path) -> FileType {
                 | "mts" | "m2ts" | "3gp" => FileType::Video,
                 "mp3" | "m4a" | "flac" | "ogg" | "oga" | "opus" | "wav" | "aac" | "aif"
                 | "aiff" | "wma" => FileType::Audio,
-                "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif" => {
-                    FileType::ImagePreview
-                }
-                "svg" | "ico" | "heic" | "heif" => FileType::Image,
+                "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif"
+                | "svg" => FileType::ImagePreview,
+                "ico" | "heic" | "heif" => FileType::Image,
                 "zip" | "7z" | "rar" | "tar" | "gz" | "xz" | "bz2" | "zst" | "tgz" => {
                     FileType::Archive
                 }
