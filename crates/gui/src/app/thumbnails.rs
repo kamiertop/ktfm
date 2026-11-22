@@ -168,17 +168,19 @@ impl Thumbnails {
             return None;
         }
         self.pending.insert(key.clone());
+        let Some(disk) = self.disk.clone() else {
+            // 没有可查的磁盘缓存，直接排队生成。
+            self.backlog.push_back(key);
+            self.pump(cx);
+            return None;
+        };
         self.reads += 1;
-        let disk = self.disk.clone();
         let path = key.path.clone();
         let renderer = cx.svg_renderer();
         let job_key = key.clone();
         let job = cx.background_spawn(async move {
             // 等待期间其他窗口或程序可能已生成缩略图，先查共享缓存。
-            if let Some(disk) = disk.as_ref()
-                && let Some(source) =
-                    disk.source_with_metadata(&path, job_key.modified, job_key.size)
-            {
+            if let Some(source) = disk.source_with_metadata(&path, job_key.modified, job_key.size) {
                 match disk.load(&source, device_size) {
                     sys::thumbnail_cache::LoadResult::Thumbnail(bytes) => {
                         if let Some(image) = decode(bytes, &renderer) {
@@ -202,9 +204,6 @@ impl Thumbnails {
                 cache.reads -= 1;
                 match state {
                     Some(state) => cache.finish(key, state, cx),
-                    // 未安装 ffmpeg 是环境问题而非文件问题，不进生成队列，
-                    // 也不写失败标记，下次启动环境变化后可恢复。
-                    None if cache.ffmpeg.is_none() => cache.finish(key, ThumbnailState::Failed, cx),
                     None => cache.backlog.push_back(key),
                 }
                 cache.pump(cx);
@@ -220,16 +219,18 @@ impl Thumbnails {
         while self.generating < MAX_GENERATIONS
             && let Some(key) = self.backlog.pop_front()
         {
+            // 未安装 ffmpeg 是环境问题而非文件问题，不写失败标记，
+            // 会话内不重试，下次启动环境变化后可恢复。
+            let Some(ffmpeg) = self.ffmpeg.clone() else {
+                self.finish(key, ThumbnailState::Failed, cx);
+                continue;
+            };
             self.generating += 1;
             let disk = self.disk.clone();
-            let ffmpeg = self.ffmpeg.clone();
             let path = key.path.clone();
             let renderer = cx.svg_renderer();
             let job_key = key.clone();
             let job = cx.background_spawn(async move {
-                let Some(ffmpeg) = ffmpeg else {
-                    return ThumbnailState::Failed;
-                };
                 match sys::media::thumbnail(&ffmpeg, &path) {
                     Some(bytes) => {
                         // 生成期间文件可能被替换，校验未变才落盘。

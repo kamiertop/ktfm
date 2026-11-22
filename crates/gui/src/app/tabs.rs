@@ -12,7 +12,7 @@ use settings::tag::Tag;
 use uuid::Uuid;
 
 use super::App;
-use super::browser::TabBrowseState;
+use super::browser::{ScrollAnchor, TabBrowseState};
 use super::preferences::ActivePreferences;
 use super::workspace::WorkspaceWriter;
 use crate::components::{icon_button, truncated_text, with_tooltip};
@@ -23,7 +23,16 @@ const TAB_OUTLINE_WIDTH: Pixels = px(1.5);
 /// 历史条目：位置 + 离开该位置时的滚动锚点，返回时恢复。
 struct HistoryEntry {
     location: Location,
-    scroll: Option<super::browser::ScrollAnchor>,
+    scroll: Option<ScrollAnchor>,
+}
+
+impl HistoryEntry {
+    fn new(location: Location) -> Self {
+        Self {
+            location,
+            scroll: None,
+        }
+    }
 }
 
 pub(super) struct BrowserTab {
@@ -40,13 +49,7 @@ impl BrowserTab {
             id,
             terminal: Default::default(),
             browse_state: None,
-            history: location
-                .into_iter()
-                .map(|location| HistoryEntry {
-                    location,
-                    scroll: None,
-                })
-                .collect(),
+            history: location.into_iter().map(HistoryEntry::new).collect(),
             index: 0,
         }
     }
@@ -57,10 +60,7 @@ impl BrowserTab {
 
     fn visit(&mut self, location: Location) {
         self.history.truncate(self.index + 1);
-        self.history.push(HistoryEntry {
-            location,
-            scroll: None,
-        });
+        self.history.push(HistoryEntry::new(location));
         self.index = self.history.len() - 1;
     }
 
@@ -78,10 +78,7 @@ impl BrowserTab {
         if current_removed {
             self.history.insert(
                 index,
-                HistoryEntry {
-                    location: Location::directory(destination.to_owned()),
-                    scroll: None,
-                },
+                HistoryEntry::new(Location::directory(destination.to_owned())),
             );
             self.browse_state = None;
         }
@@ -397,7 +394,7 @@ impl App {
 
     fn location_changed(
         &mut self,
-        scroll: Option<super::browser::ScrollAnchor>,
+        scroll: Option<ScrollAnchor>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -407,7 +404,7 @@ impl App {
     fn change_browser_location(
         &mut self,
         saved: Option<TabBrowseState>,
-        scroll: Option<super::browser::ScrollAnchor>,
+        scroll: Option<ScrollAnchor>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

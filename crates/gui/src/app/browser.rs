@@ -352,27 +352,22 @@ impl Browser {
     }
 
     pub(super) fn scroll_anchor(&self) -> Option<ScrollAnchor> {
-        let pending = self.restore_row;
-        let position = pending.map_or_else(
-            || {
-                if let Some(layout) = &self.grid_layout {
-                    return self.grid_scroll.logical_scroll_top().item_ix * layout.columns;
-                }
+        // 有待恢复的位置时以它为准，避免锚点来回抖动。
+        let (position, offset_in_item) = match self.restore_row {
+            Some(restore) => (restore.position, restore.offset_in_item),
+            // 锚点取顶部可见行，并保留行内偏移以便完整还原。
+            None if let Some(layout) = &self.grid_layout => {
+                let top = self.grid_scroll.logical_scroll_top();
+                (top.item_ix * layout.columns, top.offset_in_item)
+            }
+            None => (
                 self.scroll_layout.map_or(0, |(columns, row_height)| {
                     let offset = self.scroll.0.borrow().base_handle.offset();
                     ((-offset.y / row_height).max(0.) as usize) * columns
-                })
-            },
-            |restore| restore.position,
-        );
-        let offset_in_item = pending.map_or_else(
-            || {
-                self.grid_layout.as_ref().map_or(px(0.), |_| {
-                    self.grid_scroll.logical_scroll_top().offset_in_item
-                })
-            },
-            |restore| restore.offset_in_item,
-        );
+                }),
+                px(0.),
+            ),
+        };
         let index = *self.visible.get(position)?;
         Some(ScrollAnchor {
             path: self.entry(index)?.path.clone(),

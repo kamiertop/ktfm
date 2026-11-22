@@ -13,6 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use md5::{Digest, Md5};
 use url::Url;
 
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
 /// 从小到大的尺寸档位，与规范保持一致。
 const BUCKETS: [&str; 4] = ["normal", "large", "x-large", "xx-large"];
 const NORMAL_PX: u32 = 128;
@@ -117,7 +119,6 @@ impl ThumbnailCache {
         if !source.is_current() {
             return None;
         }
-        let mtime = source.mtime()?;
         let mut reader = png::Decoder::new(Cursor::new(bytes)).read_info().ok()?;
         if reader.info().width > NORMAL_PX || reader.info().height > NORMAL_PX {
             return None;
@@ -135,7 +136,7 @@ impl ThumbnailCache {
         if let Some(transparency) = &reader.info().trns {
             writer.set_trns(transparency.to_vec());
         }
-        add_shared_text_chunks(&mut writer, source, mtime);
+        add_shared_text_chunks(&mut writer, source)?;
         let mut writer = writer.write_header().ok()?;
         writer
             .write_image_data(&pixels[..info.buffer_size()])
@@ -150,13 +151,12 @@ impl ThumbnailCache {
 
     /// 生成失败时写入持久标记；文件元数据变化后标记自然失效。
     pub fn save_failure(&self, source: &SourceThumbnail) -> Option<()> {
-        let mtime = source.mtime()?;
         let dir = self.root.join("fail").join(SOFTWARE);
         let path = dir.join(&source.filename);
         let mut file = atomic_tempfile(&dir)?;
         let mut writer = png::Encoder::new(file.as_file_mut(), 1, 1);
         writer.set_color(png::ColorType::Rgba);
-        add_shared_text_chunks(&mut writer, source, mtime);
+        add_shared_text_chunks(&mut writer, source)?;
         let mut writer = writer.write_header().ok()?;
         writer.write_image_data(&[0, 0, 0, 0]).ok()?;
         writer.finish().ok()?;
@@ -169,7 +169,7 @@ impl ThumbnailCache {
         Ok(self.our_entries()?.iter().map(|entry| entry.bytes).sum())
     }
 
-    /// 只删除本应用写入的条目，返回删除后的剩余用量。
+    /// 只删除本应用写入的条目。
     pub fn clear(&self) -> io::Result<u64> {
         for entry in self.our_entries()? {
             match fs::remove_file(&entry.path) {
@@ -178,7 +178,8 @@ impl ThumbnailCache {
                 Err(error) => return Err(error),
             }
         }
-        self.disk_usage()
+        // 己有条目已全部删除。
+        Ok(0)
     }
 
     fn our_entries(&self) -> io::Result<Vec<CacheEntry>> {
@@ -250,14 +251,15 @@ fn atomic_tempfile(dir: &Path) -> Option<tempfile::NamedTempFile> {
 fn add_shared_text_chunks(
     writer: &mut png::Encoder<&mut fs::File>,
     source: &SourceThumbnail,
-    mtime: i64,
-) {
+) -> Option<()> {
+    let mtime = source.mtime()?;
     // 纳秒精度块是规范允许的自定义 tEXt，其他应用会忽略。
     let _ = writer.add_text_chunk("Thumb::URI".into(), source.uri.to_string());
     let _ = writer.add_text_chunk("Thumb::MTime".into(), mtime.to_string());
     let _ = writer.add_text_chunk("Thumb::Size".into(), source.size.to_string());
     let _ = writer.add_text_chunk("Software".into(), SOFTWARE.into());
     let _ = writer.add_text_chunk("ktfm::MTimeNs".into(), source.mtime_nanos().to_string());
+    Some(())
 }
 
 fn load_png(path: &Path, source: &SourceThumbnail) -> Option<Vec<u8>> {
@@ -268,21 +270,14 @@ fn load_png(path: &Path, source: &SourceThumbnail) -> Option<Vec<u8>> {
     }
     // 元数据可在图像数据之后，读取到 IEND 再验证。
     png.finish().ok()?;
-    let text = |key| {
-        png.info()
-            .uncompressed_latin1_text
-            .iter()
-            .find(|chunk| chunk.keyword == key)
-            .map(|chunk| chunk.text.as_str())
-    };
-    let uri_matches = text("Thumb::URI") == Some(source.uri.as_str());
-    let mtime_matches = match text("ktfm::MTimeNs").and_then(|value| value.parse().ok()) {
+    let uri_matches = png_text(png.info(), "Thumb::URI") == Some(source.uri.as_str());
+    let mtime_matches = match png_text(png.info(), "ktfm::MTimeNs").and_then(parse_i128) {
         // 自己写的条目按纳秒校验；其他应用的条目退回规范要求的秒级校验。
         Some(nanos) => Some(nanos) == Some(source.mtime_nanos()),
-        None => text("Thumb::MTime").and_then(|value| value.parse::<i64>().ok()) == source.mtime(),
+        None => png_text(png.info(), "Thumb::MTime").and_then(parse_i64) == source.mtime(),
     };
-    let size_matches =
-        text("Thumb::Size").is_none_or(|value| value.parse().ok() == Some(source.size));
+    let size_matches = png_text(png.info(), "Thumb::Size")
+        .is_none_or(|value| parse_u64(value) == Some(source.size));
     (uri_matches && mtime_matches && size_matches).then_some(bytes)
 }
 
@@ -307,6 +302,26 @@ fn failure_marker_matches(path: &Path, source: &SourceThumbnail) -> bool {
         && text("ktfm::MTimeNs").and_then(|value| value.parse().ok()) == Some(source.mtime_nanos())
 }
 
+/// 读取 PNG 的 tEXt 字段（latin-1 解码）。
+fn png_text<'a>(info: &'a png::Info<'_>, key: &str) -> Option<&'a str> {
+    info.uncompressed_latin1_text
+        .iter()
+        .find(|chunk| chunk.keyword == key)
+        .map(|chunk| chunk.text.as_str())
+}
+
+fn parse_i128(value: &str) -> Option<i128> {
+    value.parse().ok()
+}
+
+fn parse_i64(value: &str) -> Option<i64> {
+    value.parse().ok()
+}
+
+fn parse_u64(value: &str) -> Option<u64> {
+    value.parse().ok()
+}
+
 fn read_bounded(path: &Path) -> Option<Vec<u8>> {
     if !fs::symlink_metadata(path).ok()?.is_file() {
         return None;
@@ -320,20 +335,47 @@ fn read_bounded(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= MAX_CACHE_FILE).then_some(bytes)
 }
 
+/// 只读文件开头判断归属：本应用写入的 Software 块位于图像数据之前，
+/// 统计与清理无需读取整个共享缓存。
 fn png_software_is_ours(path: &Path) -> bool {
-    let Some(bytes) = read_bounded(path) else {
+    const PREFIX: usize = 16 * 1024;
+    let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
-    let Ok(mut png) = png::Decoder::new(Cursor::new(&bytes)).read_info() else {
+    let mut buffer = vec![0; PREFIX];
+    let Ok(read) = file.read(&mut buffer) else {
         return false;
     };
-    if png.finish().is_err() {
+    buffer.truncate(read);
+    if buffer.get(..8) != Some(&PNG_SIGNATURE) {
         return false;
     }
-    png.info()
-        .uncompressed_latin1_text
-        .iter()
-        .any(|chunk| chunk.keyword == "Software" && chunk.text == SOFTWARE)
+    let mut pos = 8;
+    while let Some(length) = chunk_length(&buffer, pos) {
+        let kind = &buffer[pos + 4..pos + 8];
+        // 图像数据开始后不再有归属信息。
+        if kind == b"IDAT" || kind == b"IEND" {
+            return false;
+        }
+        let end = pos + 8 + length;
+        if kind == b"tEXt"
+            && let Some(chunk) = buffer.get(pos + 8..end)
+            && let Some(nul) = chunk.iter().position(|&byte| byte == 0)
+            && chunk[..nul] == *b"Software"
+            && chunk[nul + 1..] == *SOFTWARE.as_bytes()
+        {
+            return true;
+        }
+        pos = end + 4;
+    }
+    false
+}
+
+/// 读取位置处的 PNG 块长度；越界或长度异常返回 None。
+fn chunk_length(buffer: &[u8], pos: usize) -> Option<usize> {
+    let header = buffer.get(pos..pos + 8)?;
+    let length = u32::from_be_bytes(header[..4].try_into().ok()?) as usize;
+    (pos + 8 + length + 4 <= buffer.len()).then_some(length)
 }
 
 impl SourceThumbnail {
