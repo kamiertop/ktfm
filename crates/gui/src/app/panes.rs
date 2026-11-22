@@ -363,22 +363,6 @@ impl App {
         self.pane_layout.neighbor(self.active_pane, layout, forward)
     }
 
-    pub(super) fn browser_pane_viewport(&self, window: &Window) -> Size<Pixels> {
-        if self.panes.len() > 1
-            && let Some(size) = self.pane().measured_size
-        {
-            return size;
-        }
-        let viewport = window.viewport_size();
-        let bounds = window.bounds().size;
-        let width = viewport.width.max(bounds.width);
-        let height = viewport.height.max(bounds.height);
-        size(
-            (width - SIDEBAR_WIDTH).max(px(0.)),
-            (height - TITLE_BAR_HEIGHT).max(px(0.)),
-        )
-    }
-
     pub(super) fn browser_panes(
         &mut self,
         border_width: Pixels,
