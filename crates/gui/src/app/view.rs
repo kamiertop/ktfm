@@ -30,6 +30,7 @@ use crate::app::window_resize;
 use crate::model::{SidebarItem, default_favorites, home_directory};
 use crate::style::{APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_RADIUS};
 use settings::config::general::StartupBehavior;
+use settings::config::view::ViewMode;
 
 /// 文件管理器主视图，持有导航历史、搜索输入和显示设置。
 pub struct App {
@@ -310,6 +311,12 @@ impl Render for App {
             }))
             .on_action(cx.listener(|this, _: &keymap::ZoomOut, window, cx| {
                 this.file_zoom_shortcut(-1, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &keymap::ViewGrid, window, cx| {
+                this.view_mode_shortcut(ViewMode::Grid, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &keymap::ViewList, window, cx| {
+                this.view_mode_shortcut(ViewMode::List, window, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &OpenTerminal, window, cx| this.toggle_terminal(window, cx)),

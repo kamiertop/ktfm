@@ -23,6 +23,10 @@ pub struct ShortcutConfig {
     pub open_preferences: String,
     pub zoom_in: String,
     pub zoom_out: String,
+    /// 切换到网格视图，默认 Alt+1。
+    pub view_grid: String,
+    /// 切换到列表视图，默认 Alt+2。
+    pub view_list: String,
     pub select_all: String,
     pub copy: String,
     pub cut: String,
@@ -59,6 +63,8 @@ impl Default for ShortcutConfig {
             open_preferences: "ctrl-p".into(),
             zoom_in: "ctrl-=".into(),
             zoom_out: "ctrl--".into(),
+            view_grid: "alt-1".into(),
+            view_list: "alt-2".into(),
             select_all: "ctrl-a".into(),
             copy: "ctrl-c".into(),
             cut: "ctrl-x".into(),

@@ -150,6 +150,27 @@ impl App {
         }
     }
 
+    /// 键盘切换网格/列表视图的分发入口（Alt+1/2 之类，由键绑定触发）。
+    ///
+    /// 焦点在输入框或对话框打开时不拦截也不切换，避免抢走输入框的按键。
+    pub(super) fn view_mode_shortcut(
+        &mut self,
+        mode: ViewMode,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let pane = self.pane();
+        let list_focused = pane.view_mode == ViewMode::List
+            && pane
+                .file_table
+                .as_ref()
+                .is_some_and(|table| table.read(cx).focus_handle(cx).contains_focused(window, cx));
+        if (self.focus.is_focused(window) || list_focused) && self.pane_changes_allowed() {
+            cx.stop_propagation();
+            self.set_view_mode(mode, cx);
+        }
+    }
+
     fn zoom_file_view(&mut self, steps: i8, cx: &mut Context<Self>) {
         let pane = &mut self.panes[self.pane_target];
         let step = clamp_zoom_step(pane.view_mode, pane.zoom_step.saturating_add(steps));

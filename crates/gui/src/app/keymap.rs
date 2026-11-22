@@ -29,6 +29,8 @@ actions!(
         OpenPreferences,
         ZoomIn,
         ZoomOut,
+        ViewGrid,
+        ViewList,
         SplitPane,
         SplitDown,
         SplitLeft,
@@ -171,6 +173,8 @@ shortcut_entries! {
     // 视图
     (ZoomIn, zoom_in, ShortcutGroup::View, "放大文件视图", ShortcutScope::FileArea),
     (ZoomOut, zoom_out, ShortcutGroup::View, "缩小文件视图", ShortcutScope::FileArea),
+    (ViewGrid, view_grid, ShortcutGroup::View, "切换到网格视图", ShortcutScope::FileArea),
+    (ViewList, view_list, ShortcutGroup::View, "切换到列表视图", ShortcutScope::FileArea),
     // 终端
     (OpenTerminal, open_terminal, ShortcutGroup::Terminal, "打开终端", ShortcutScope::Everywhere),
     (TerminalCopy, terminal_copy, ShortcutGroup::Terminal, "内置终端复制", ShortcutScope::Terminal),
@@ -205,7 +209,7 @@ pub(super) fn validate(shortcuts: &ShortcutConfig) -> Result<(), String> {
 
 /// 把一份快捷键配置安装为全局键绑定。整体校验通过后才安装，
 /// 任一按键无效即报错且不改动现有绑定。
-pub(super) fn bind_all(shortcuts: &ShortcutConfig, cx: &mut gpui_kit::App) -> Result<(), String> {
+pub(super) fn bind_all(shortcuts: &ShortcutConfig, cx: &mut App) -> Result<(), String> {
     validate(shortcuts)?;
     let bindings = SHORTCUTS
         .iter()
@@ -217,7 +221,7 @@ pub(super) fn bind_all(shortcuts: &ShortcutConfig, cx: &mut gpui_kit::App) -> Re
 
 /// 解除一份快捷键配置对应的绑定。重新绑定前先移除旧按键，
 /// 否则同一动作会同时挂着新旧两个键。
-pub(super) fn unbind_all(shortcuts: &ShortcutConfig, cx: &mut gpui_kit::App) {
+pub(super) fn unbind_all(shortcuts: &ShortcutConfig, cx: &mut App) {
     // 旧配置在加载或保存时已通过校验，这里的解析失败静默跳过即可。
     let unbind = SHORTCUTS
         .iter()
