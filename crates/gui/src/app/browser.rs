@@ -100,6 +100,13 @@ impl Drop for ReadTask {
     }
 }
 
+/// 待恢复的滚动位置：可见条目位置 + 网格行内偏移（完整还原含最底部）。
+#[derive(Clone, Copy)]
+pub(super) struct RowRestore {
+    pub(super) position: usize,
+    pub(super) offset_in_item: Pixels,
+}
+
 #[derive(Default)]
 pub(super) struct TabBrowseState {
     pub(super) search: String,
@@ -123,6 +130,8 @@ impl TabBrowseState {
 pub(super) struct ScrollAnchor {
     pub(super) path: PathBuf,
     pub(super) position: usize,
+    /// 网格行内偏移，还原到底部时不丢最后半行。
+    pub(super) offset_in_item: Pixels,
 }
 
 #[derive(PartialEq)]
@@ -161,7 +170,7 @@ pub(super) struct Browser {
     pub(super) scroll_layout: Option<(usize, Pixels)>,
     pub(super) grid_scroll: ListState,
     grid_layout: Option<GridScrollLayout>,
-    pub(super) restore_row: Option<usize>,
+    pub(super) restore_row: Option<RowRestore>,
     pub(super) tab_restore: Option<TabBrowseState>,
     pub(super) action_error: Option<String>,
     pub(super) filtering: bool,
@@ -343,26 +352,41 @@ impl Browser {
     }
 
     pub(super) fn scroll_anchor(&self) -> Option<ScrollAnchor> {
-        let position = self.restore_row.unwrap_or_else(|| {
-            if let Some(layout) = &self.grid_layout {
-                return self.grid_scroll.logical_scroll_top().item_ix * layout.columns;
-            }
-            self.scroll_layout.map_or(0, |(columns, row_height)| {
-                let offset = self.scroll.0.borrow().base_handle.offset();
-                ((-offset.y / row_height).max(0.) as usize) * columns
-            })
-        });
+        let pending = self.restore_row;
+        let position = pending.map_or_else(
+            || {
+                if let Some(layout) = &self.grid_layout {
+                    return self.grid_scroll.logical_scroll_top().item_ix * layout.columns;
+                }
+                self.scroll_layout.map_or(0, |(columns, row_height)| {
+                    let offset = self.scroll.0.borrow().base_handle.offset();
+                    ((-offset.y / row_height).max(0.) as usize) * columns
+                })
+            },
+            |restore| restore.position,
+        );
+        let offset_in_item = pending.map_or_else(
+            || {
+                self.grid_layout.as_ref().map_or(px(0.), |_| {
+                    self.grid_scroll.logical_scroll_top().offset_in_item
+                })
+            },
+            |restore| restore.offset_in_item,
+        );
         let index = *self.visible.get(position)?;
         Some(ScrollAnchor {
             path: self.entry(index)?.path.clone(),
             position,
+            offset_in_item,
         })
     }
 
     fn restore_scroll(&mut self, anchor: &ScrollAnchor) {
-        self.restore_row = self.visible.len().checked_sub(1).map(|last| {
-            self.visible_position(&anchor.path)
-                .unwrap_or(anchor.position.min(last))
+        self.restore_row = self.visible.len().checked_sub(1).map(|last| RowRestore {
+            position: self
+                .visible_position(&anchor.path)
+                .unwrap_or(anchor.position.min(last)),
+            offset_in_item: anchor.offset_in_item,
         });
     }
 
@@ -1095,7 +1119,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::Modifiers;
+    use gpui_kit::{Modifiers, px};
     use std::{path::Path, sync::Arc};
 
     use super::{Browser, DirectoryState, RecentDirectories, RecentDirectory};
@@ -1289,7 +1313,8 @@ mod tests {
         browser.restore_scroll(&super::ScrollAnchor {
             path: "/0".into(),
             position: 0,
+            offset_in_item: px(0.),
         });
-        assert_eq!(browser.restore_row, Some(2));
+        assert_eq!(browser.restore_row.map(|restore| restore.position), Some(2));
     }
 }

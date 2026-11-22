@@ -249,10 +249,10 @@ impl App {
         if layout.grid {
             browser.stop_child_counts();
             browser.prepare_grid_scroll(layout.columns, layout.tile_width, layout.icon_size);
-            if let Some(position) = browser.restore_row.take() {
+            if let Some(restore) = browser.restore_row.take() {
                 browser.grid_scroll.scroll_to(ListOffset {
-                    item_ix: position / layout.columns,
-                    offset_in_item: px(0.),
+                    item_ix: restore.position / layout.columns,
+                    offset_in_item: restore.offset_in_item,
                 });
             }
             if let Some(position) = browser.reveal_row.take() {
@@ -268,10 +268,10 @@ impl App {
             }
         } else {
             browser.scroll_layout = Some((1, layout.row_height()));
-            if let Some(row) = browser.restore_row.take() {
+            if let Some(restore) = browser.restore_row.take() {
                 browser
                     .scroll
-                    .scroll_to_item_strict(row, ScrollStrategy::Top);
+                    .scroll_to_item_strict(restore.position, ScrollStrategy::Top);
             }
             if let Some(row) = browser.reveal_row.take() {
                 browser.scroll.scroll_to_item(row, ScrollStrategy::Nearest);
