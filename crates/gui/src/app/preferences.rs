@@ -4,6 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable as _, StyledExt as _, TitleBar, h_flex, v_flex,
 };
@@ -23,7 +24,8 @@ use super::App;
 use super::embed_terminal::parse_background;
 use super::io_queue::IoQueue;
 use super::keymap::{
-    SHORTCUTS, ShortcutScope, bind_all, parse_shortcut, shortcut_os, unbind_all, validate,
+    SHORTCUTS, ShortcutGroup, ShortcutScope, bind_all, parse_shortcut, shortcut_os, unbind_all,
+    validate,
 };
 use super::window_resize;
 use crate::components::preferences_title_bar;
@@ -168,6 +170,12 @@ pub(super) struct Preferences {
     /// 正在录制的快捷键，指向 `keymap::SHORTCUTS` 的下标。
     recording: Option<usize>,
     shortcut_focus: FocusHandle,
+    /// 快捷键页顶部的搜索词。
+    shortcut_search: Entity<InputState>,
+    /// 按键查找模式：下一次按键写入搜索框而不是当作输入。
+    search_capture: bool,
+    /// 录制/按键查找时当前按住的修饰键，用于录制槽里的实时预览。
+    held_modifiers: Vec<&'static str>,
     choosing_program: bool,
     terminal_background: Entity<InputState>,
     #[cfg(target_os = "linux")]
@@ -214,6 +222,8 @@ impl App {
                     &shortcut_focus,
                     window,
                     |this: &mut Preferences, _, _, cx| {
+                        this.search_capture = false;
+                        this.held_modifiers.clear();
                         if this.recording.take().is_some() {
                             cx.notify();
                         }
@@ -223,6 +233,22 @@ impl App {
                 let terminal_background = cx.new(|cx| {
                     InputState::new(window, cx).default_value(baseline.terminal.background.clone())
                 });
+                let shortcut_search =
+                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称，或直接按下组合键"));
+                cx.subscribe_in(
+                    &shortcut_search,
+                    window,
+                    |_: &mut Preferences,
+                     _: &Entity<InputState>,
+                     event: &InputEvent,
+                     _: &mut Window,
+                     cx: &mut Context<Preferences>| {
+                        if matches!(event, InputEvent::Change) {
+                            cx.notify();
+                        }
+                    },
+                )
+                .detach();
                 cx.subscribe_in(
                     &terminal_background,
                     window,
@@ -249,8 +275,11 @@ impl App {
                     saving: false,
                     focus,
                     page: Page::View,
+                    shortcut_search,
                     shortcut_focus,
+                    search_capture: false,
                     recording: None,
+                    held_modifiers: Vec::new(),
                     choosing_program: false,
                     terminal_background,
                     #[cfg(target_os = "linux")]
@@ -378,96 +407,244 @@ impl Preferences {
         cx.notify();
     }
 
-    fn record_shortcut(
+    /// 快捷键页的统一按键入口：录制改键、按键查找，以及搜索框聚焦时
+    /// 直接按下组合键查找。修饰键的实时预览由 [`Self::update_held_modifiers`] 维护。
+    fn handle_shortcut_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.recording else { return };
-        let Some(entry) = SHORTCUTS.get(index) else {
-            return;
-        };
-        if !self.shortcut_focus.is_focused(window) {
-            return;
-        }
-        cx.stop_propagation();
-        if event.is_held || self.busy() {
-            return;
-        }
         let key = &event.keystroke;
-        if key.key == "escape" && !key.modifiers.modified() {
-            self.recording = None;
-            self.error = None;
-        } else if key.key == "backspace" && !key.modifiers.modified() {
-            // 退格清除绑定，空串即未绑定。
-            *((entry.get_mut)(&mut self.draft.shortcuts)) = String::new();
-            self.recording = None;
-            window.focus(&self.focus, cx);
-            self.save(window, cx);
+        let trap_focused = self.shortcut_focus.is_focused(window);
+        let input_focused = self
+            .shortcut_search
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx);
+        if !trap_focused && !input_focused {
             return;
-        } else {
-            let value = key.unparse(shortcut_os());
-            let mut shortcuts = self.draft.shortcuts.clone();
-            *(entry.get_mut)(&mut shortcuts) = value;
-            if let Err(error) = validate(&shortcuts) {
-                self.error = Some(error);
+        }
+        // 纯修饰键的按下/抬起不结束捕获，预览交给 modifiers 变化回调。
+        if key.is_modifier_key() {
+            if trap_focused {
+                cx.stop_propagation();
+            }
+            return;
+        }
+
+        // 焦点在捕获层：录制/查找期间所有按键在此终结，
+        // 绝不冒泡给根节点的“Esc 关闭窗口”。
+        if trap_focused {
+            if !self.search_capture && self.recording.is_none() {
+                // 空闲的捕获层：Esc 先退回主焦点（再次按 Esc 才可能关窗），
+                // 其余按键放行。
+                if key.key == "escape" && !key.modifiers.modified() {
+                    cx.stop_propagation();
+                    window.focus(&self.focus, cx);
+                }
+                return;
+            }
+            cx.stop_propagation();
+            if event.is_held {
+                return;
+            }
+
+            // 按键查找：把按下的任意按键写入搜索框，Esc 取消。
+            if self.search_capture {
+                if key.key == "escape" && !key.modifiers.modified() {
+                    self.search_capture = false;
+                } else {
+                    let value = key.unparse(shortcut_os());
+                    self.shortcut_search
+                        .update(cx, |input, cx| input.set_value(value, window, cx));
+                    self.search_capture = false;
+                }
+                self.held_modifiers.clear();
+                self.focus_after_capture(window, cx);
                 cx.notify();
                 return;
             }
-            self.draft.shortcuts = shortcuts;
-            self.recording = None;
-            window.focus(&self.focus, cx);
-            self.save(window, cx);
+
+            // 录制改键。
+            let Some(index) = self.recording else { return };
+            let Some(entry) = SHORTCUTS.get(index) else {
+                return;
+            };
+            if self.busy() {
+                return;
+            }
+            self.held_modifiers.clear();
+            if key.key == "escape" && !key.modifiers.modified() {
+                self.recording = None;
+                self.error = None;
+            } else if key.key == "backspace" && !key.modifiers.modified() {
+                // 退格清除绑定，空串即未绑定。
+                *((entry.get_mut)(&mut self.draft.shortcuts)) = String::new();
+                self.recording = None;
+                self.focus_after_capture(window, cx);
+                self.save(window, cx);
+                return;
+            } else {
+                let value = key.unparse(shortcut_os());
+                let mut shortcuts = self.draft.shortcuts.clone();
+                *(entry.get_mut)(&mut shortcuts) = value;
+                if let Err(error) = validate(&shortcuts) {
+                    // 无效按键只提示不退出录制，直接重按即可。
+                    self.error = Some(error);
+                    cx.notify();
+                    return;
+                }
+                self.draft.shortcuts = shortcuts;
+                self.recording = None;
+                self.focus_after_capture(window, cx);
+                self.save(window, cx);
+                return;
+            }
+        }
+
+        // 搜索框聚焦时，输入框自己未占用的组合键与功能键直接转为按键查找。
+        // 输入框占用的键（Ctrl-A、退格、方向键等）在键绑定阶段就被消费，到不了这里。
+        if !event.is_held && is_direct_search_key(key) {
+            cx.stop_propagation();
+            let value = key.unparse(shortcut_os());
+            self.shortcut_search
+                .update(cx, |input, cx| input.set_value(value, window, cx));
+            cx.notify();
+        }
+    }
+
+    /// 结束录制/按键查找后的落点：快捷键页回到搜索框（此后 Esc 只会清空
+    /// 搜索词）；其他页面留在捕获层，下一次 Esc 先退回主焦点而不是直接关窗。
+    fn focus_after_capture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page == Page::Shortcuts {
+            let search = self.shortcut_search.read(cx).focus_handle(cx);
+            window.focus(&search, cx);
+        }
+    }
+
+    /// 录制与按键查找时刷新按住的修饰键预览。
+    fn update_held_modifiers(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.recording.is_none() && !self.search_capture {
             return;
         }
-        window.focus(&self.focus, cx);
-        cx.notify();
+        let labels = held_modifier_labels(&event.modifiers);
+        if self.held_modifiers != labels {
+            self.held_modifiers = labels;
+            cx.notify();
+        }
     }
 
     fn shortcut_row(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let entry = &SHORTCUTS[index];
         let value = (entry.get)(&self.draft.shortcuts);
         let recording = self.recording == Some(index);
-        let caption = if recording {
-            "按键（esc 取消，退格清除）".to_owned()
-        } else if value.trim().is_empty() {
-            "未绑定".to_owned()
-        } else {
-            parse_shortcut(value, entry.label).map_or_else(
-                |_| value.to_lowercase(),
-                |key| {
-                    let binding = key.unparse(shortcut_os());
-                    let prefix = &binding[..binding.len() - key.key.len()];
-                    format!("{}{}", prefix.replace('-', "+"), key.key.to_lowercase())
-                },
-            )
-        };
-        preference_row(
-            entry.label,
-            Button::new(entry.label)
-                .outline()
-                .w(px(144.))
-                .h_9()
-                .px_3()
-                .label(caption)
-                .disabled(
-                    self.busy()
-                        || (entry.scope == ShortcutScope::Terminal && self.embedded_disabled()),
+        let disabled =
+            self.busy() || (entry.scope == ShortcutScope::Terminal && self.embedded_disabled());
+        let theme = cx.theme();
+        let border = preferences_palette(theme.mode).border;
+        // 录制中：单行录制槽。accent 只用在边框上，文字与键帽用常规配色，
+        // 完整操作提示放 tooltip。
+        let content = if recording {
+            h_flex()
+                .flex_shrink_0()
+                .w_full()
+                .h(px(28.))
+                .px(px(8.))
+                .gap_1()
+                .items_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(theme.accent)
+                .bg(theme.accent.opacity(0.08))
+                .text_xs()
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
+                        .when(self.held_modifiers.is_empty(), |row| {
+                            row.child(div().child("按下新按键…"))
+                        })
+                        .when(!self.held_modifiers.is_empty(), |row| {
+                            row.children(self.held_modifiers.iter().map(|label| {
+                                keycap(label, border, theme.list_hover)
+                            }))
+                            .child(div().text_color(theme.muted_foreground).child("+"))
+                        }),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if this.busy()
-                        || (SHORTCUTS[index].scope == ShortcutScope::Terminal
-                            && this.embedded_disabled())
-                    {
-                        return;
-                    }
-                    this.recording = Some(index);
-                    this.error = None;
-                    window.focus(&this.shortcut_focus, cx);
-                    cx.notify();
-                })),
-        )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(theme.muted_foreground)
+                        .child("Esc 取消"),
+                )
+                .into_any_element()
+        } else {
+            match parse_shortcut(value, entry.label) {
+                Ok(key) if !value.trim().is_empty() => h_flex()
+                    .items_center()
+                    .gap_1()
+                    .children(
+                        keycap_labels(&key)
+                            .into_iter()
+                            .map(|label| keycap(&label, border, theme.list_hover)),
+                    )
+                    .into_any_element(),
+                _ if value.trim().is_empty() => div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("未绑定")
+                    .into_any_element(),
+                _ => div()
+                    .text_xs()
+                    .child(value.to_lowercase())
+                    .into_any_element(),
+            }
+        };
+        // 整块仍是可点击组件，但不再用边框包裹，悬停以底色反馈。
+        let key_area = h_flex()
+            .id(SharedString::from(format!("shortcut-{index}")))
+            .role(Role::Button)
+            .aria_label(entry.label)
+            .justify_end()
+            .items_center()
+            .w(px(190.))
+            .h_9()
+            .px_2()
+            .rounded_md()
+            .when(disabled, |row| row.opacity(0.5))
+            .when(!disabled, |row| {
+                row.cursor_pointer()
+                    .hover(|style| style.bg(theme.list_hover.opacity(0.6)))
+            })
+            .when(recording, |row| {
+                row.tooltip(|window, cx| {
+                    Tooltip::new("Esc 取消，退格清除绑定").build(window, cx)
+                })
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if this.busy()
+                    || (SHORTCUTS[index].scope == ShortcutScope::Terminal
+                        && this.embedded_disabled())
+                {
+                    return;
+                }
+                this.search_capture = false;
+                this.held_modifiers.clear();
+                this.recording = Some(index);
+                this.error = None;
+                window.focus(&this.shortcut_focus, cx);
+                cx.notify();
+            }))
+            .child(content);
+        preference_row(entry.label, key_area)
     }
 
     fn choose_terminal_program(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -881,13 +1058,144 @@ impl Preferences {
     }
 
     fn shortcuts_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        v_flex().gap_3().children(
-            SHORTCUTS
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| entry.scope != ShortcutScope::Terminal)
-                .map(|(index, _)| self.shortcut_row(index, cx)),
-        )
+        let query = normalized_shortcut_query(&self.shortcut_search.read(cx).value());
+        let muted = cx.theme().muted_foreground;
+        let border = preferences_palette(cx.theme().mode).border;
+        let mut matched = 0;
+        let mut sections = Vec::new();
+        for group in [
+            ShortcutGroup::Tabs,
+            ShortcutGroup::Files,
+            ShortcutGroup::View,
+            ShortcutGroup::Terminal,
+            ShortcutGroup::App,
+        ] {
+            let mut rows = Vec::new();
+            for (index, entry) in SHORTCUTS.iter().enumerate() {
+                if entry.group == group && shortcut_matches(entry, &self.draft.shortcuts, &query) {
+                    matched += 1;
+                    rows.push(self.shortcut_row(index, cx));
+                }
+            }
+            let count = rows.len();
+            if count > 0 {
+                // 每组一张卡片，卡内行间用分隔线，避免上下串行。
+                let card = v_flex()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .overflow_hidden()
+                    .children(rows.into_iter().enumerate().map(|(position, row)| {
+                        div()
+                            .px_3()
+                            .when(position + 1 < count, |row| {
+                                row.border_b_1().border_color(border)
+                            })
+                            .child(row)
+                    }));
+                sections.push(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(muted)
+                                .child(group.label()),
+                        )
+                        .child(card),
+                );
+            }
+        }
+        let capturing = self.search_capture;
+        let (accent, muted) = (cx.theme().accent, cx.theme().muted_foreground);
+        // 顶部查找框：输入文字按名称过滤；聚焦时直接按下 Ctrl/Alt/Super 组合
+        // 或功能键即按按键查找。键盘图标开启按键查找模式，可捕获 Esc、Home 等裸键。
+        // accent 只用在边框和图标上，文字用常规前景色保证可读。
+        let search_field: AnyElement = if capturing {
+            h_flex()
+                .id("shortcut-search-capture")
+                .role(Role::Button)
+                .aria_label("取消按键查找")
+                .w_full()
+                .h(px(32.))
+                .px_3()
+                .gap_2()
+                .items_center()
+                .rounded_md()
+                .border_1()
+                .border_color(accent)
+                .bg(accent.opacity(0.06))
+                .cursor_pointer()
+                .hover(|style| style.bg(accent.opacity(0.1)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.search_capture = false;
+                    this.held_modifiers.clear();
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                }))
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
+                        .text_sm()
+                        .when(self.held_modifiers.is_empty(), |row| {
+                            row.child(div().child("按下要查找的按键…"))
+                        })
+                        .when(!self.held_modifiers.is_empty(), |row| {
+                            row.children(self.held_modifiers.iter().map(|label| {
+                                keycap(label, border, cx.theme().list_hover)
+                            }))
+                            .child(div().text_color(muted).child("+"))
+                        }),
+                )
+                .child(div().text_xs().text_color(muted).child("Esc 取消"))
+                .into_any_element()
+        } else {
+            div()
+                .flex_1()
+                .child(
+                    Input::new(&self.shortcut_search)
+                        .prefix(
+                            Icon::new(IconName::Search)
+                                .size(px(14.))
+                                .text_color(muted),
+                        )
+                        .suffix(
+                            h_flex()
+                                .id("shortcut-search-capture-toggle")
+                                .role(Role::Button)
+                                .aria_label("按键查找")
+                                .cursor_pointer()
+                                .p(px(3.))
+                                .rounded(px(4.))
+                                .hover(|style| style.bg(cx.theme().list_hover))
+                                .child(
+                                    Icon::new(IconName::Keyboard)
+                                        .size(px(14.))
+                                        .text_color(muted),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    // 进入按键查找：焦点移到捕获层，下一次按键写入搜索框。
+                                    this.search_capture = true;
+                                    this.recording = None;
+                                    this.held_modifiers.clear();
+                                    window.focus(&this.shortcut_focus, cx);
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element()
+        };
+        v_flex()
+            .gap_4()
+            .child(h_flex().gap_2().child(search_field))
+            .children(sections)
+            .when(query.is_some() && matched == 0, |page| {
+                page.child(div().text_sm().text_color(muted).child("没有匹配的快捷键"))
+            })
     }
 
     #[cfg(target_os = "linux")]
@@ -1020,12 +1328,48 @@ impl Render for Preferences {
                 frame.border_1().border_color(palette.border)
             })
             .track_focus(&self.focus)
-            .capture_key_down(cx.listener(Self::record_shortcut))
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    window.remove_window();
-                    cx.stop_propagation();
+            .capture_key_down(cx.listener(Self::handle_shortcut_key))
+            // 录制与按键查找时刷新按住的修饰键，用于录制槽的实时预览。
+            .on_modifiers_changed(cx.listener(Self::update_held_modifiers))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key != "escape" {
+                    return;
                 }
+                // Esc 逐层退让：录制、按键查找、保存进行中绝不关闭窗口。
+                if this.recording.is_some() || this.search_capture || this.saving {
+                    cx.stop_propagation();
+                    return;
+                }
+                // 搜索框聚焦时 Esc 只清空搜索词，不关闭窗口。
+                if this
+                    .shortcut_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+                {
+                    if !this.shortcut_search.read(cx).value().trim().is_empty() {
+                        this.shortcut_search
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
+                // 有搜索词时 Esc 先清空搜索，再次按下才关闭窗口。
+                if !this.shortcut_search.read(cx).value().trim().is_empty() {
+                    this.shortcut_search
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    cx.stop_propagation();
+                    return;
+                }
+                // 有错误提示时先关掉提示，再按才关闭窗口。
+                if this.error.is_some() {
+                    this.error = None;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                window.remove_window();
+                cx.stop_propagation();
             }))
             .child(
                 div()
@@ -1145,6 +1489,163 @@ fn preference_choice(
         .toggled(selected)
 }
 
+/// 键帽展示顺序与文本：修饰键在前，主键在后。
+fn keycap_labels(key: &Keystroke) -> Vec<String> {
+    let mut labels = Vec::new();
+    if key.modifiers.control {
+        labels.push("Ctrl".into());
+    }
+    if key.modifiers.alt {
+        labels.push("Alt".into());
+    }
+    if key.modifiers.shift {
+        labels.push("Shift".into());
+    }
+    if key.modifiers.platform {
+        labels.push(
+            if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Super"
+            }
+            .into(),
+        );
+    }
+    labels.push(display_key_name(&key.key));
+    labels
+}
+
+/// 主键的展示名：单键大写，功能键与方向键用习惯缩写。
+fn display_key_name(key: &str) -> String {
+    match key {
+        "escape" => "Esc".into(),
+        "backspace" => "Backspace".into(),
+        "delete" => "Del".into(),
+        "insert" => "Ins".into(),
+        "enter" => "Enter".into(),
+        "tab" => "Tab".into(),
+        "space" => "Space".into(),
+        "up" => "Up".into(),
+        "down" => "Down".into(),
+        "left" => "Left".into(),
+        "right" => "Right".into(),
+        "home" => "Home".into(),
+        "end" => "End".into(),
+        "pageup" => "PgUp".into(),
+        "pagedown" => "PgDn".into(),
+        single if single.chars().count() == 1 => single.to_uppercase(),
+        function
+            if function.starts_with('f') && function[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            function.to_uppercase()
+        }
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        }
+    }
+}
+
+/// 单个键帽格：底色填充，比仅边框更醒目。
+fn keycap(label: &str, border: Hsla, surface: Hsla) -> impl IntoElement + use<> {
+    h_flex()
+        .flex_shrink_0()
+        .min_w(px(22.))
+        .h(px(22.))
+        .px(px(6.))
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .border_1()
+        .border_color(border)
+        .bg(surface)
+        .text_xs()
+        .child(label.to_owned())
+}
+
+/// 录制之外的展示文案：未绑定或规范化按键（如 ctrl+shift+n）。
+fn shortcut_caption(entry: &super::keymap::ShortcutEntry, value: &str) -> String {
+    if value.trim().is_empty() {
+        "未绑定".to_owned()
+    } else {
+        parse_shortcut(value, entry.label).map_or_else(
+            |_| value.to_lowercase(),
+            |key| {
+                let binding = key.unparse(shortcut_os());
+                let prefix = &binding[..binding.len() - key.key.len()];
+                format!("{}{}", prefix.replace('-', "+"), key.key.to_lowercase())
+            },
+        )
+    }
+}
+
+/// 搜索词规范化：小写、去空格，并统一按 “ctrl-c” 形式比较按键段。
+fn normalized_shortcut_query(value: &str) -> Option<String> {
+    let normalized = value
+        .trim()
+        .to_lowercase()
+        .replace(' ', "")
+        .replace('+', "-");
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// 搜索框聚焦时可直接转为按键查找的按键：Ctrl/Alt/Super 组合与 F 功能键。
+/// 这些按键不会向输入框插入文本；输入框自己占用的键（Ctrl-A、退格、
+/// 方向键等）在键绑定阶段就被消费，根本到不了这里。
+fn is_direct_search_key(key: &Keystroke) -> bool {
+    !key.is_modifier_key()
+        && (key.modifiers.control
+            || key.modifiers.alt
+            || key.modifiers.platform
+            || is_function_key(&key.key))
+}
+
+/// 是否 F1–F35 这类功能键。
+fn is_function_key(key: &str) -> bool {
+    key.len() >= 2 && key.starts_with('f') && key[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 按住修饰键的展示顺序，与键帽一致：修饰键在前。
+fn held_modifier_labels(modifiers: &Modifiers) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if modifiers.control {
+        labels.push("Ctrl");
+    }
+    if modifiers.alt {
+        labels.push("Alt");
+    }
+    if modifiers.shift {
+        labels.push("Shift");
+    }
+    if modifiers.platform {
+        labels.push(if cfg!(target_os = "macos") {
+            "Cmd"
+        } else {
+            "Super"
+        });
+    }
+    labels
+}
+
+/// 名称或当前按键包含搜索词即命中；无搜索词时全部命中。
+fn shortcut_matches(
+    entry: &super::keymap::ShortcutEntry,
+    shortcuts: &settings::config::shortcuts::ShortcutConfig,
+    query: &Option<String>,
+) -> bool {
+    let Some(query) = query else {
+        return true;
+    };
+    if entry.label.to_lowercase().contains(query) {
+        return true;
+    }
+    let caption = shortcut_caption(entry, (entry.get)(shortcuts));
+    caption.to_lowercase().replace('+', "-").contains(query)
+}
+
 fn preference_row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
     h_flex()
         .min_h_10()
@@ -1162,10 +1663,58 @@ fn quote_program_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::keymap::{parse_shortcut, shortcut_os};
+    use super::{display_key_name, keycap_labels};
+
+    #[test]
+    fn keycap_labels_place_modifiers_before_the_key() {
+        let key = parse_shortcut("ctrl-shift-t", "测试").unwrap();
+        assert_eq!(keycap_labels(&key), ["Ctrl", "Shift", "T"]);
+        let key = parse_shortcut("alt-f2", "测试").unwrap();
+        assert_eq!(keycap_labels(&key), ["Alt", "F2"]);
+        assert_eq!(display_key_name("pageup"), "PgUp");
+        assert_eq!(display_key_name("escape"), "Esc");
+        assert_eq!(display_key_name("single"), "Single");
+    }
+
     use super::{
-        AppConfig, BlankDoubleClickAction, Keystroke, PreferenceValues, ShortcutConfig, ViewConfig,
-        ViewMode, quote_program_path,
+        AppConfig, BlankDoubleClickAction, Keystroke, Modifiers, PreferenceValues,
+        ShortcutConfig, ViewConfig, ViewMode, quote_program_path,
     };
+
+    #[test]
+    fn direct_search_keys_cover_combos_and_function_keys_only() {
+        let key = |source: &str| Keystroke::parse_with_os(source, shortcut_os()).unwrap();
+        assert!(super::is_direct_search_key(&key("ctrl-shift-n")));
+        assert!(super::is_direct_search_key(&key("alt-f2")));
+        assert!(super::is_direct_search_key(&key("super-e")));
+        // 裸功能键不插入文本，可直接查找。
+        assert!(super::is_direct_search_key(&key("f5")));
+        // 裸字母与 Shift 组合仍是正常打字，不触发按键查找。
+        assert!(!super::is_direct_search_key(&key("a")));
+        assert!(!super::is_direct_search_key(&key("shift-a")));
+        // 纯修饰键不结束捕获。
+        assert!(!super::is_direct_search_key(&key("control")));
+        assert!(super::is_function_key("f12"));
+        assert!(!super::is_function_key("f"));
+        assert!(!super::is_function_key("filter"));
+    }
+
+    #[test]
+    fn held_modifier_labels_follow_keycap_order() {
+        let modifiers = Modifiers {
+            control: true,
+            shift: true,
+            platform: true,
+            ..Modifiers::default()
+        };
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &["Ctrl", "Shift", "Cmd"]
+        } else {
+            &["Ctrl", "Shift", "Super"]
+        };
+        assert_eq!(super::held_modifier_labels(&modifiers), expected);
+        assert!(super::held_modifier_labels(&Modifiers::default()).is_empty());
+    }
 
     #[test]
     fn recorded_shortcuts_round_trip_with_modifiers() {

@@ -46,7 +46,7 @@ actions!(browser, [TerminalCopy, TerminalPaste]);
 const CANCEL_CUT_KEY: &str = "escape";
 const CANCEL_CUT_LABEL: &str = "取消剪切";
 
-pub(super) fn bind_fixed_keys(cx: &mut gpui_kit::App) {
+pub(super) fn bind_fixed_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(
             CANCEL_CUT_KEY,
@@ -90,6 +90,28 @@ impl ShortcutScope {
     }
 }
 
+/// 快捷键在偏好设置页所属的功能分组。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ShortcutGroup {
+    Tabs,
+    Files,
+    View,
+    Terminal,
+    App,
+}
+
+impl ShortcutGroup {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Tabs => "标签页与分栏",
+            Self::Files => "文件操作",
+            Self::View => "视图",
+            Self::Terminal => "终端",
+            Self::App => "应用",
+        }
+    }
+}
+
 /// 一条可配置快捷键的全部信息。
 pub(super) struct ShortcutEntry {
     /// 动作构造器：绑定与解绑各需要一个新实例。
@@ -100,12 +122,14 @@ pub(super) struct ShortcutEntry {
     pub(super) get_mut: fn(&mut ShortcutConfig) -> &mut String,
     /// 偏好设置页展示的名称。
     pub(super) label: &'static str,
+    /// 偏好设置页的分组。
+    pub(super) group: ShortcutGroup,
     pub(super) scope: ShortcutScope,
 }
 
 macro_rules! shortcut_entries {
-    ($(($action:expr, $field:ident, $label:literal, $scope:expr)),* $(,)?) => {
-        /// 全部可配置快捷键，顺序即偏好设置页的展示顺序。
+    ($(($action:expr, $field:ident, $group:expr, $label:literal, $scope:expr)),* $(,)?) => {
+        /// 全部可配置快捷键，顺序即偏好设置页的展示顺序（按分组排列）。
         pub(super) const SHORTCUTS: &[ShortcutEntry] = &[
             $(
                 ShortcutEntry {
@@ -113,6 +137,7 @@ macro_rules! shortcut_entries {
                     get: |config| &config.$field,
                     get_mut: |config| &mut config.$field,
                     label: $label,
+                    group: $group,
                     scope: $scope,
                 }
             ),*
@@ -121,32 +146,37 @@ macro_rules! shortcut_entries {
 }
 
 shortcut_entries! {
-    (NewTab, new_tab, "新建标签页", ShortcutScope::FileArea),
-    (CloseTab, close_tab, "关闭标签页", ShortcutScope::FileArea),
-    (SplitPane, split_pane, "向右分栏", ShortcutScope::FileArea),
-    (SplitDown, split_down, "向下分栏", ShortcutScope::FileArea),
-    (SplitLeft, split_left, "向左分栏", ShortcutScope::FileArea),
-    (SplitUp, split_up, "向上分栏", ShortcutScope::FileArea),
-    (PaneLeft, pane_left, "向左切换活动栏", ShortcutScope::FileArea),
-    (PaneRight, pane_right, "向右切换活动栏", ShortcutScope::FileArea),
-    (PaneUp, pane_up, "向上切换活动栏", ShortcutScope::FileArea),
-    (PaneDown, pane_down, "向下切换活动栏", ShortcutScope::FileArea),
-    (ClosePane, close_pane, "关闭分栏", ShortcutScope::FileArea),
-    (OpenTerminal, open_terminal, "打开终端", ShortcutScope::Everywhere),
-    (OpenPreferences, open_preferences, "偏好设置", ShortcutScope::FileArea),
-    (ZoomIn, zoom_in, "放大文件视图", ShortcutScope::FileArea),
-    (ZoomOut, zoom_out, "缩小文件视图", ShortcutScope::FileArea),
-    (FileAction::SelectAll, select_all, "全选", ShortcutScope::FileArea),
-    (FileAction::Copy, copy, "复制", ShortcutScope::FileArea),
-    (FileAction::Cut, cut, "剪切", ShortcutScope::FileArea),
-    (FileAction::Paste, paste, "粘贴", ShortcutScope::FileArea),
-    (FileAction::Rename, rename, "重命名", ShortcutScope::FileArea),
-    (FileAction::Trash, trash, "移到回收站", ShortcutScope::FileArea),
-    (FileAction::NewFolder, new_folder, "新建文件夹", ShortcutScope::FileArea),
-    (FileAction::NewDocument, new_document, "新建文档", ShortcutScope::FileArea),
-    (FileAction::Properties, properties, "文件夹属性", ShortcutScope::FileArea),
-    (TerminalCopy, terminal_copy, "内置终端复制", ShortcutScope::Terminal),
-    (TerminalPaste, terminal_paste, "内置终端粘贴", ShortcutScope::Terminal),
+    // 标签页与分栏
+    (NewTab, new_tab, ShortcutGroup::Tabs, "新建标签页", ShortcutScope::FileArea),
+    (CloseTab, close_tab, ShortcutGroup::Tabs, "关闭标签页", ShortcutScope::FileArea),
+    (SplitPane, split_pane, ShortcutGroup::Tabs, "向右分栏", ShortcutScope::FileArea),
+    (SplitDown, split_down, ShortcutGroup::Tabs, "向下分栏", ShortcutScope::FileArea),
+    (SplitLeft, split_left, ShortcutGroup::Tabs, "向左分栏", ShortcutScope::FileArea),
+    (SplitUp, split_up, ShortcutGroup::Tabs, "向上分栏", ShortcutScope::FileArea),
+    (PaneLeft, pane_left, ShortcutGroup::Tabs, "向左切换活动栏", ShortcutScope::FileArea),
+    (PaneRight, pane_right, ShortcutGroup::Tabs, "向右切换活动栏", ShortcutScope::FileArea),
+    (PaneUp, pane_up, ShortcutGroup::Tabs, "向上切换活动栏", ShortcutScope::FileArea),
+    (PaneDown, pane_down, ShortcutGroup::Tabs, "向下切换活动栏", ShortcutScope::FileArea),
+    (ClosePane, close_pane, ShortcutGroup::Tabs, "关闭分栏", ShortcutScope::FileArea),
+    // 文件操作
+    (FileAction::SelectAll, select_all, ShortcutGroup::Files, "全选", ShortcutScope::FileArea),
+    (FileAction::Copy, copy, ShortcutGroup::Files, "复制", ShortcutScope::FileArea),
+    (FileAction::Cut, cut, ShortcutGroup::Files, "剪切", ShortcutScope::FileArea),
+    (FileAction::Paste, paste, ShortcutGroup::Files, "粘贴", ShortcutScope::FileArea),
+    (FileAction::Rename, rename, ShortcutGroup::Files, "重命名", ShortcutScope::FileArea),
+    (FileAction::Trash, trash, ShortcutGroup::Files, "移到回收站", ShortcutScope::FileArea),
+    (FileAction::NewFolder, new_folder, ShortcutGroup::Files, "新建文件夹", ShortcutScope::FileArea),
+    (FileAction::NewDocument, new_document, ShortcutGroup::Files, "新建文档", ShortcutScope::FileArea),
+    (FileAction::Properties, properties, ShortcutGroup::Files, "文件夹属性", ShortcutScope::FileArea),
+    // 视图
+    (ZoomIn, zoom_in, ShortcutGroup::View, "放大文件视图", ShortcutScope::FileArea),
+    (ZoomOut, zoom_out, ShortcutGroup::View, "缩小文件视图", ShortcutScope::FileArea),
+    // 终端
+    (OpenTerminal, open_terminal, ShortcutGroup::Terminal, "打开终端", ShortcutScope::Everywhere),
+    (TerminalCopy, terminal_copy, ShortcutGroup::Terminal, "内置终端复制", ShortcutScope::Terminal),
+    (TerminalPaste, terminal_paste, ShortcutGroup::Terminal, "内置终端粘贴", ShortcutScope::Terminal),
+    // 应用
+    (OpenPreferences, open_preferences, ShortcutGroup::App, "偏好设置", ShortcutScope::FileArea),
 }
 
 /// 校验整份快捷键配置：逐条解析非空按键，并检查生效范围相交的重复。
