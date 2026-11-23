@@ -121,7 +121,7 @@ impl App {
         }
         match drag {
             BookmarkDrag::Folder(path) => {
-                if self.is_default_favorite(path) || bookmarks.find(path).is_some() {
+                if bookmarks.find(path).is_some() {
                     return;
                 }
                 let path = path.clone();
@@ -205,9 +205,6 @@ impl App {
         present: bool,
         cx: &mut Context<Self>,
     ) {
-        if self.is_default_favorite(&path) {
-            return;
-        }
         self.change_bookmarks(
             move |bookmarks| {
                 if present {

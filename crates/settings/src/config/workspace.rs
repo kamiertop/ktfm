@@ -22,6 +22,9 @@ pub struct Workspace {
     pub file_list_columns: FileListColumns,
     /// 上次记住的窗口大小，下次启动时恢复
     pub window_size: Option<WindowSize>,
+    /// 是否已把 XDG 常用目录（不含主目录，主目录固定在侧栏顶部）播种
+    /// 为书签。只播种一次，之后用户的删除不会被下次启动重新加回。
+    pub default_directories_seeded: bool,
 }
 
 /// 记住的窗口大小（逻辑像素）。
@@ -125,6 +128,16 @@ mod tests {
     use crate::config::tab::{Location, SplitLayout, TabItem};
 
     use uuid::Uuid;
+
+    #[test]
+    fn workspace_without_seed_flag_reads_as_unseeded() {
+        // 没有播种标记的工作区视为未播种；置位后随文件持久化。
+        let mut workspace: Workspace = toml::from_str("").unwrap();
+        assert!(!workspace.default_directories_seeded);
+        workspace.default_directories_seeded = true;
+        let text = toml::to_string_pretty(&workspace).unwrap();
+        assert!(text.contains("default_directories_seeded = true"));
+    }
 
     #[test]
     fn concurrent_workspace_updates_preserve_bookmarks_and_session() -> Result<()> {

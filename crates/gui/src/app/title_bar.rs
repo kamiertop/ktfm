@@ -20,16 +20,10 @@ impl App {
     ) -> impl IntoElement {
         let home = self.home().map(ToOwned::to_owned);
         let home_disabled = home.as_deref() == self.location() || home.is_none();
-        let default_favorite = self
+        let bookmarked = self
             .location()
-            .is_some_and(|path| self.is_default_favorite(path));
-        let bookmarked = default_favorite
-            || self
-                .location()
-                .is_some_and(|path| self.bookmarks.read(cx).find(path).is_some());
-        let bookmark_label = if default_favorite {
-            "默认位置"
-        } else if bookmarked {
+            .is_some_and(|path| self.bookmarks.read(cx).find(path).is_some());
+        let bookmark_label = if bookmarked {
             "从书签移除"
         } else {
             "将当前目录添加到书签"
@@ -74,7 +68,7 @@ impl App {
             .child(with_tooltip(
                 icon_button("bookmark-directory", IconName::Bookmark, bookmark_label)
                     .toggled(bookmarked)
-                    .disabled(default_favorite || self.location().is_none())
+                    .disabled(self.location().is_none())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(path) = this.location().map(ToOwned::to_owned) {
                             this.set_bookmark(path, BookmarkKind::Directory, !bookmarked, cx);

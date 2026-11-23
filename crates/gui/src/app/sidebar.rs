@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use settings::config::bookmark::BookmarkKind;
 
 use gpui_kit::assets::IconName;
@@ -22,12 +20,6 @@ use crate::style::{
 };
 
 impl App {
-    pub(super) fn is_default_favorite(&self, path: &Path) -> bool {
-        self.default_favorites
-            .iter()
-            .any(|item| item.path.as_deref() == Some(path))
-    }
-
     pub(super) fn sidebar(&self, radius: Pixels, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (background, border, foreground, danger) = (
@@ -38,12 +30,9 @@ impl App {
         );
         let entity = cx.entity().downgrade();
         let location = self.location();
-        let bookmarks = self
-            .bookmarks
-            .read(cx)
-            .items()
-            .iter()
-            .filter(|item| !self.is_default_favorite(&item.path.0));
+        let home = self.home().map(ToOwned::to_owned);
+        let (home_active, home_missing) = (home.as_deref() == location, home.is_none());
+        let bookmarks = self.bookmarks.read(cx).items().iter();
         let has_bookmarks = bookmarks.clone().next().is_some();
         let next_ids = bookmarks.clone().skip(1).map(|item| Some(item.id));
         let bookmarks =
@@ -181,34 +170,53 @@ impl App {
             .child(
                 v_flex()
                     .gap_0p5()
-                    .children(
-                        self.default_favorites
-                            .iter()
-                            .enumerate()
-                            .map(|(index, item)| {
-                                sidebar_row(
-                                    item.name,
-                                    item.name.to_owned(),
-                                    item.icon,
-                                    None,
-                                    item.path.is_some() && item.path.as_deref() == location,
-                                    cx,
-                                )
-                                .when(item.path.is_none(), |row| row.opacity(0.5))
-                                .when_some(item.path.clone(), |row, path| {
-                                    row.cursor_pointer().on_click(cx.listener(
-                                        move |this, _, window, cx| {
-                                            this.navigate(path.clone(), window, cx);
-                                        },
-                                    ))
-                                })
-                                .when(
-                                    !has_bookmarks && index + 1 == self.default_favorites.len(),
-                                    |row| row.relative().child(bookmark_drop_half(None, false, cx)),
-                                )
-                            }),
+                    .child(
+                        sidebar_row(
+                            "sidebar-home",
+                            "主文件夹".to_owned(),
+                            IconName::House,
+                            None,
+                            home_active,
+                            cx,
+                        )
+                        .when_some(home, |row, home| {
+                            row.cursor_pointer().on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.navigate(home.clone(), window, cx);
+                                },
+                            ))
+                        })
+                        .when(home_missing, |row| row.opacity(0.5)),
                     )
-                    .children(bookmarks),
+                    // 回收站尚未实现，先作为占位展示。
+                    .child(
+                        sidebar_row(
+                            "sidebar-trash",
+                            "回收站".to_owned(),
+                            IconName::Trash,
+                            None,
+                            false,
+                            cx,
+                        )
+                        .opacity(0.5),
+                    ),
+            )
+            // 固定项（主文件夹/回收站）与书签之间的分隔线。
+            .child(div().mx_1().h(px(1.)).bg(sidebar_divider_color(theme.mode)))
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .children(bookmarks)
+                    .when(!has_bookmarks, |group| {
+                        // 书签被清空时保留一个不可见的落点，拖目录进来仍可新建书签。
+                        group.child(
+                            div()
+                                .id("bookmarks-empty")
+                                .relative()
+                                .h_8()
+                                .child(bookmark_drop_half(None, false, cx)),
+                        )
+                    }),
             )
             .child(
                 section(cx)
@@ -248,15 +256,6 @@ impl App {
                         ),
                     )
                 },
-            )
-            .child(
-                section(cx).children(
-                    [("网络", IconName::Network), ("回收站", IconName::Trash)]
-                        .into_iter()
-                        .map(|(name, icon)| {
-                            sidebar_row(name, name.to_owned(), icon, None, false, cx).opacity(0.5)
-                        }),
-                ),
             )
             .overflow_y_scrollbar();
 

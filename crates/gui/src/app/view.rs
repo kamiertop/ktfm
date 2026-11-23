@@ -6,7 +6,7 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::{
     AppConfig,
-    bookmark::Bookmarks,
+    bookmark::{BookmarkKind, Bookmarks},
     tab::{Location, SplitLayout},
     workspace::Workspace,
 };
@@ -27,7 +27,7 @@ use super::volumes::{SharedStorage, StorageDevices, VolumeUnlock, VolumeUnmounte
 use super::window_geometry::{self, GeometrySaver};
 use super::workspace::WorkspaceWriter;
 use crate::app::window_resize;
-use crate::model::{SidebarItem, default_favorites, home_directory};
+use crate::model::{default_bookmarks, home_directory};
 use crate::style::{APP_ID, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_RADIUS};
 use settings::config::general::StartupBehavior;
 use settings::config::view::ViewMode;
@@ -55,7 +55,7 @@ pub struct App {
     pub(super) tag_editor: Option<TagEditor>,
     pub(super) storage: Entity<StorageDevices>,
     pub(super) volume_unlock: Option<VolumeUnlock>,
-    pub(super) default_favorites: Vec<SidebarItem>,
+    pub(super) home: Option<PathBuf>,
     pub(super) preferences: Option<WindowHandle<Preferences>>,
 }
 
@@ -159,6 +159,26 @@ impl App {
                 workspace.file_list_columns.clone().normalize(),
             ));
         }
+        // 首次启动把 XDG 常用目录播种为普通书签（显示名跟随实际目录名，
+        // 由用户 user-dirs 配置决定）。主目录固定在侧栏顶部，不参与播种。
+        // 只播种一次，之后用户的增删不会被下次启动覆盖。
+        if persist_session && workspace_error.is_none() && !workspace.default_directories_seeded {
+            let directories = default_bookmarks();
+            match Workspace::update(|stored| {
+                if stored.default_directories_seeded {
+                    return;
+                }
+                for path in directories {
+                    if stored.bookmarks.find(&path).is_none() {
+                        stored.bookmarks.add(path, BookmarkKind::Directory);
+                    }
+                }
+                stored.default_directories_seeded = true;
+            }) {
+                Ok(stored) => workspace = stored,
+                Err(error) => tracing::warn!(%error, "无法播种默认书签"),
+            }
+        }
         let tag_state = cx.global::<SharedTags>().0.clone();
         let (tabs, active_tab, bookmarks) = if let Some((path, bookmarks)) = target {
             (
@@ -224,7 +244,7 @@ impl App {
             tag_editor: None,
             storage: cx.global::<SharedStorage>().state.clone(),
             volume_unlock: None,
-            default_favorites: default_favorites(home),
+            home,
             preferences: None,
         };
         cx.observe_global::<super::file_table::FileColumnPreferences>(|_, cx| cx.notify())

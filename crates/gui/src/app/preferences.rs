@@ -233,8 +233,9 @@ impl App {
                 let terminal_background = cx.new(|cx| {
                     InputState::new(window, cx).default_value(baseline.terminal.background.clone())
                 });
-                let shortcut_search =
-                    cx.new(|cx| InputState::new(window, cx).placeholder("搜索名称，或直接按下组合键"));
+                let shortcut_search = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("搜索名称，或直接按下组合键")
+                });
                 cx.subscribe_in(
                     &shortcut_search,
                     window,
@@ -573,9 +574,11 @@ impl Preferences {
                             row.child(div().child("按下新按键…"))
                         })
                         .when(!self.held_modifiers.is_empty(), |row| {
-                            row.children(self.held_modifiers.iter().map(|label| {
-                                keycap(label, border, theme.list_hover)
-                            }))
+                            row.children(
+                                self.held_modifiers
+                                    .iter()
+                                    .map(|label| keycap(label, border, theme.list_hover)),
+                            )
                             .child(div().text_color(theme.muted_foreground).child("+"))
                         }),
                 )
@@ -625,9 +628,7 @@ impl Preferences {
                     .hover(|style| style.bg(theme.list_hover.opacity(0.6)))
             })
             .when(recording, |row| {
-                row.tooltip(|window, cx| {
-                    Tooltip::new("Esc 取消，退格清除绑定").build(window, cx)
-                })
+                row.tooltip(|window, cx| Tooltip::new("Esc 取消，退格清除绑定").build(window, cx))
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 if this.busy()
@@ -1145,9 +1146,11 @@ impl Preferences {
                             row.child(div().child("按下要查找的按键…"))
                         })
                         .when(!self.held_modifiers.is_empty(), |row| {
-                            row.children(self.held_modifiers.iter().map(|label| {
-                                keycap(label, border, cx.theme().list_hover)
-                            }))
+                            row.children(
+                                self.held_modifiers
+                                    .iter()
+                                    .map(|label| keycap(label, border, cx.theme().list_hover)),
+                            )
                             .child(div().text_color(muted).child("+"))
                         }),
                 )
@@ -1158,11 +1161,7 @@ impl Preferences {
                 .flex_1()
                 .child(
                     Input::new(&self.shortcut_search)
-                        .prefix(
-                            Icon::new(IconName::Search)
-                                .size(px(14.))
-                                .text_color(muted),
-                        )
+                        .prefix(Icon::new(IconName::Search).size(px(14.)).text_color(muted))
                         .suffix(
                             h_flex()
                                 .id("shortcut-search-capture-toggle")
@@ -1677,8 +1676,8 @@ mod tests {
     }
 
     use super::{
-        AppConfig, BlankDoubleClickAction, Keystroke, Modifiers, PreferenceValues,
-        ShortcutConfig, ViewConfig, ViewMode, quote_program_path,
+        AppConfig, BlankDoubleClickAction, Keystroke, Modifiers, PreferenceValues, ShortcutConfig,
+        ViewConfig, ViewMode, quote_program_path,
     };
 
     #[test]

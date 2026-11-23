@@ -4,50 +4,24 @@ use directories::{BaseDirs, UserDirs};
 use gpui_kit::assets::IconName;
 use vfs::EntryKind;
 
-pub struct SidebarItem {
-    pub name: &'static str,
-    pub icon: IconName,
-    pub path: Option<PathBuf>,
-}
-
-pub fn default_favorites(home: Option<PathBuf>) -> Vec<SidebarItem> {
+/// 首次启动播种进侧栏书签的 XDG 常用目录。主目录不在此列，
+/// 它固定显示在侧栏顶部。不带固定显示名：名称由路径本身决定，
+/// 跟随用户 user-dirs 配置的语言。
+pub fn default_bookmarks() -> Vec<PathBuf> {
     let user_dirs = UserDirs::new();
     let user = user_dirs.as_ref();
-    let item = |name, icon, path| SidebarItem { name, icon, path };
-
-    vec![
-        item("主文件夹", IconName::House, home),
-        item(
-            "桌面",
-            IconName::Monitor,
-            user.and_then(UserDirs::desktop_dir).map(Into::into),
-        ),
-        item(
-            "文档",
-            IconName::Folder,
-            user.and_then(UserDirs::document_dir).map(Into::into),
-        ),
-        item(
-            "下载",
-            IconName::Download,
-            user.and_then(UserDirs::download_dir).map(Into::into),
-        ),
-        item(
-            "图片",
-            IconName::Images,
-            user.and_then(UserDirs::picture_dir).map(Into::into),
-        ),
-        item(
-            "音乐",
-            IconName::Music,
-            user.and_then(UserDirs::audio_dir).map(Into::into),
-        ),
-        item(
-            "视频",
-            IconName::Film,
-            user.and_then(UserDirs::video_dir).map(Into::into),
-        ),
+    let directory = |dir: fn(&UserDirs) -> Option<&Path>| user.and_then(dir).map(PathBuf::from);
+    [
+        directory(UserDirs::desktop_dir),
+        directory(UserDirs::document_dir),
+        directory(UserDirs::download_dir),
+        directory(UserDirs::picture_dir),
+        directory(UserDirs::audio_dir),
+        directory(UserDirs::video_dir),
     ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub fn home_directory() -> Option<PathBuf> {

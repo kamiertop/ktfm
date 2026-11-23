@@ -144,9 +144,7 @@ impl App {
             EntryKind::File | EntryKind::Symlink => Some(BookmarkKind::File),
             _ => None,
         };
-        if let Some(bookmark_kind) = bookmark_kind
-            && !app.is_default_favorite(&path)
-        {
+        if let Some(bookmark_kind) = bookmark_kind {
             let bookmarked = app.bookmarks.read(cx).find(&path).is_some();
             let (label, icon) = if bookmarked {
                 ("从侧栏书签移除", IconName::BookmarkMinus)

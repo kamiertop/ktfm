@@ -30,17 +30,10 @@ fn reveal_path_end(scroll: &ScrollHandle) {
 
 impl App {
     pub(super) fn home(&self) -> Option<&Path> {
-        self.default_favorites.first()?.path.as_deref()
+        self.home.as_deref()
     }
 
     pub(super) fn path_appearance(&self, path: &Path) -> (String, IconName) {
-        if let Some(item) = self
-            .default_favorites
-            .iter()
-            .find(|item| item.path.as_deref() == Some(path))
-        {
-            return (item.name.to_owned(), item.icon);
-        }
         (
             path.file_name()
                 .unwrap_or(path.as_os_str())
