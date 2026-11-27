@@ -21,7 +21,7 @@ use vfs::EntryKind;
 
 use super::App;
 use super::bookmarks::BookmarkDrag;
-use super::browser::{DirectoryState, SelectedSize};
+use super::browser::{DirectoryState, FilterPhase, SelectedSize};
 use super::file_icon::file_icon;
 use super::file_operations::FileClipboard;
 use super::file_table::file_columns_controls;
@@ -224,6 +224,7 @@ impl App {
             (size, entry.name.clone())
         });
 
+        let filtering_search = browser.filtering == FilterPhase::Search;
         let (message, status) = match &self.panes[self.pane_target].browser.state {
             DirectoryState::Unavailable => (Some("无法定位主文件夹".to_owned()), String::new()),
             DirectoryState::Loading { show_message } => (
@@ -235,7 +236,7 @@ impl App {
             }
             DirectoryState::Ready(snapshot) => {
                 let directory = &snapshot.directory;
-                let message = if self.panes[self.pane_target].browser.filtering && count == 0 {
+                let message = if filtering_search && count == 0 {
                     Some("正在筛选…")
                 } else if count == 0 && self.panes[self.pane_target].browser.query.is_empty() {
                     Some("没有可显示的项目")
@@ -261,7 +262,7 @@ impl App {
                         JobKind::Trash => " · 正在移到回收站…",
                     });
                 }
-                if self.panes[self.pane_target].browser.filtering {
+                if filtering_search {
                     status.push_str(" · 正在筛选…");
                 }
                 if directory.read_errors > 0 {

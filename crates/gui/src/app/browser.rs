@@ -155,6 +155,17 @@ enum ChildCountScope {
     Sorted,
 }
 
+/// 筛选任务阶段。搜索提示保留到最新查询的结果提交。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FilterPhase {
+    /// 没有进行中的筛选任务。
+    Idle,
+    /// 即时重算（隐藏文件、排序等），不展示提示。
+    Recompute,
+    /// 查询结果尚未提交，展示“正在筛选”提示。
+    Search,
+}
+
 pub(super) struct Browser {
     pub(super) state: DirectoryState,
     pub(super) query: String,
@@ -174,7 +185,7 @@ pub(super) struct Browser {
     pub(super) restore_row: Option<RowRestore>,
     pub(super) tab_restore: Option<TabBrowseState>,
     pub(super) action_error: Option<String>,
-    pub(super) filtering: bool,
+    pub(super) filtering: FilterPhase,
     pub(super) snapshot_revision: u64,
     read_task: Option<ReadTask>,
     directory_watch: Option<Task<()>>,
@@ -456,7 +467,7 @@ impl Browser {
             restore_row: None,
             tab_restore: None,
             action_error: None,
-            filtering: false,
+            filtering: FilterPhase::Idle,
             snapshot_revision: 0,
             read_task: None,
             directory_watch: None,
@@ -482,7 +493,7 @@ impl App {
         let pane = &mut self.panes[self.pane_target];
         let pane_id = pane.id;
         let browser = &mut pane.browser;
-        let scope = if browser.filtering || browser.visible.is_empty() {
+        let scope = if browser.filtering != FilterPhase::Idle || browser.visible.is_empty() {
             None
         } else if browser.sort.by_size() {
             Some(ChildCountScope::Sorted)
@@ -669,7 +680,7 @@ impl App {
         browser.directory_watch = None;
         browser.refresh_pending = false;
         browser.filter_task = None;
-        browser.filtering = false;
+        browser.filtering = FilterPhase::Idle;
         browser.visible = Vec::new();
         browser.clear_selection();
         browser.action_error = None;
@@ -852,7 +863,7 @@ impl App {
                             browser.stop_child_counts();
                             browser.child_counts.clear();
                             browser.filter_task = None;
-                            browser.filtering = false;
+                            browser.filtering = FilterPhase::Idle;
                             browser.visible.clear();
                             browser.clear_selection();
                             browser.state = DirectoryState::Failed(error.to_string());
@@ -896,7 +907,7 @@ impl App {
         let scroll = browser.scroll_anchor();
         browser.snapshot_revision += 1;
         browser.filter_task = None;
-        browser.filtering = false;
+        browser.filtering = FilterPhase::Idle;
         browser.state = DirectoryState::Ready(snapshot);
         browser.stop_child_counts();
         browser.child_counts.clear();
@@ -981,7 +992,12 @@ impl App {
         let obsolete = cancelled.clone();
         let executor = cx.background_executor().clone();
         browser.filter_task = None;
-        browser.filtering = true;
+        // 排序和隐藏文件切换会接替当前任务，但最新查询仍待计算。
+        browser.filtering = if debounce || browser.filtering == FilterPhase::Search {
+            FilterPhase::Search
+        } else {
+            FilterPhase::Recompute
+        };
         let task = cx.spawn(async move |this, cx| {
             if debounce {
                 executor.timer(Duration::from_millis(150)).await;
@@ -1006,7 +1022,7 @@ impl App {
                         browser.restore_row = None;
                     }
                     browser.prune_selection(false);
-                    browser.filtering = false;
+                    browser.filtering = FilterPhase::Idle;
                     this.restore_snapshot_position();
                     cx.notify();
                 });
