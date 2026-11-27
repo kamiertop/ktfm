@@ -1,9 +1,12 @@
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use gpui_kit::{AppContext, Context, Entity, Global};
-use settings::config::{bookmark::Bookmarks, tab::Session, workspace::Workspace};
+use settings::config::bookmark::Bookmarks;
+use settings::config::tab::Session;
+use settings::config::workspace::Workspace;
 
 use vfs::DirectoryWatch;
 
@@ -123,7 +126,7 @@ impl WorkspaceWriter {
     }
 
     fn enqueue_session(&self, session: Session) -> bool {
-        let mut queue = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut queue = self.0.queue.lock().expect("会话保存队列的互斥锁不应中毒");
         // 写盘期间只留下最新的会话快照。
         queue.pending = Some(session);
         !std::mem::replace(&mut queue.running, true)
@@ -133,26 +136,26 @@ impl WorkspaceWriter {
         self.0
             .queue
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .expect("会话保存队列的互斥锁不应中毒")
             .error
             .clone()
     }
 
     pub(super) fn flush(&self) {
         // 退出时等待最后一个快照落盘，后台线程不依赖 GPUI 主线程。
-        let queue = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let queue = self.0.queue.lock().expect("会话保存队列的互斥锁不应中毒");
         drop(
             self.0
                 .idle
                 .wait_while(queue, |queue| queue.running)
-                .unwrap_or_else(PoisonError::into_inner),
+                .expect("会话保存队列的互斥锁不应中毒"),
         );
     }
 
     fn drain(&self) {
         loop {
             let session = {
-                let mut queue = self.0.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut queue = self.0.queue.lock().expect("会话保存队列的互斥锁不应中毒");
                 let Some(session) = queue.pending.take() else {
                     queue.running = false;
                     self.0.idle.notify_all();
@@ -169,7 +172,7 @@ impl WorkspaceWriter {
             self.0
                 .queue
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+                .expect("会话保存队列的互斥锁不应中毒")
                 .error = error;
         }
     }

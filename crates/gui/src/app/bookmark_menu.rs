@@ -1,10 +1,12 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::menu::PopupMenu;
 use gpui_kit::{Context, Pixels, WeakEntity, Window, px};
-use settings::config::{bookmark::BookmarkKind, tab::Location};
+use settings::config::bookmark::BookmarkKind;
+use settings::config::tab::Location;
 use uuid::Uuid;
 
-use super::{App, menu::app_menu_item};
+use super::App;
+use super::menu::app_menu_item;
 
 // 保持书签菜单紧凑，较长的菜单项可以撑宽。
 const BOOKMARK_MENU_MIN_WIDTH: Pixels = px(140.);

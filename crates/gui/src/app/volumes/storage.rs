@@ -59,8 +59,12 @@ impl StorageDevices {
         self.volumes.iter().find(|volume| &volume.source == source)
     }
 
-    pub(in crate::app) fn discovery_error(&self) -> Option<&String> {
-        self.discovery_errors.iter().flatten().next()
+    pub(in crate::app) fn discovery_error(&self) -> Option<&str> {
+        self.discovery_errors
+            .iter()
+            .flatten()
+            .next()
+            .map(String::as_str)
     }
 
     pub(super) fn begin_operation(

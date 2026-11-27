@@ -1,9 +1,10 @@
 use std::sync::OnceLock;
 
+use alacritty_terminal::Term;
+use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
-use alacritty_terminal::{Term, sync::FairMutex};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 

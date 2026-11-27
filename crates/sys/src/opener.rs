@@ -25,6 +25,7 @@ pub fn open(path: &Path) -> io::Result<()> {
 /// 单引号内一切字符原样；双引号内 `\"`、`\\` 转义；引号外反斜杠转义
 /// 下一字符；其余按空白分割。空行返回 None。
 /// 不引第三方 shell 解析库：只服务"程序 + 少量参数"的启动场景。
+#[must_use]
 pub fn split_command(line: &str) -> Option<(String, Vec<String>)> {
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -148,6 +149,7 @@ pub fn open_terminal(directory: &Path, program: &str) -> io::Result<std::process
 
 /// 校验外部终端程序可执行：含路径分隔符按字面路径检查，否则逐个搜索
 /// $PATH。返回解析到的完整路径。
+#[must_use]
 pub fn resolve_executable(token: &str) -> Option<PathBuf> {
     #[cfg(unix)]
     fn is_executable(path: &Path) -> bool {

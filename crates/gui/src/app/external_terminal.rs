@@ -7,7 +7,8 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use settings::config::terminal::TerminalMode;
 
-use super::{App, preferences::ActivePreferences};
+use super::App;
+use super::preferences::ActivePreferences;
 
 impl App {
     /// 根据配置打开当前标签页的内嵌终端或启动外部终端。

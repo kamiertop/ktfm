@@ -6,10 +6,8 @@ use gpui_kit::component::resizable::{
 use gpui_kit::component::{ActiveTheme, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use settings::config::{
-    tab::{GridSession, PaneColumn, SplitLayout},
-    view::ViewMode,
-};
+use settings::config::tab::{GridSession, PaneColumn, SplitLayout};
+use settings::config::view::ViewMode;
 use uuid::Uuid;
 
 use super::App;

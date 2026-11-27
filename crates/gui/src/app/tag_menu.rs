@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::{Selectable as _, actions::Cancel};
+use gpui_kit::base::Selectable as _;
+use gpui_kit::base::actions::Cancel;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;

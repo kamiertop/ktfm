@@ -5,6 +5,11 @@ use std::process::Command;
 
 use super::{Volume, VolumeSource};
 
+struct GioVolume {
+    label: String,
+    mounted: bool,
+}
+
 pub(super) fn volumes() -> io::Result<Vec<Volume>> {
     // 枚举在独立的 GIO 进程内执行，让 GVfs 的卷监视器在该进程主线程初始化。
     let mut mounted_paths = fuse_mounts();
@@ -15,7 +20,7 @@ pub(super) fn volumes() -> io::Result<Vec<Volume>> {
     };
     let mut volumes: Vec<_> = parse_volumes(&list)
         .into_iter()
-        .map(|(uri, (label, mounted))| {
+        .map(|(uri, GioVolume { label, mounted })| {
             let mountpoint = mounted_paths
                 .remove(&phone_key(&uri))
                 .map(|(_, path)| path)
@@ -83,10 +88,11 @@ fn phone_key(uri: &str) -> (String, String) {
     (scheme.to_owned(), host)
 }
 
-fn parse_volumes(list: &str) -> BTreeMap<String, (String, bool)> {
-    let mut volumes = BTreeMap::<_, (String, bool)>::new();
+fn parse_volumes(list: &str) -> BTreeMap<String, GioVolume> {
+    let mut volumes = BTreeMap::new();
     let mut volume_label = None;
-    for line in list.lines().map(str::trim) {
+    let lines = list.lines().map(str::trim);
+    for line in lines {
         if let Some(label) = line
             .strip_prefix("Volume(")
             .and_then(|line| line.split_once("): "))
@@ -96,9 +102,10 @@ fn parse_volumes(list: &str) -> BTreeMap<String, (String, bool)> {
             if let Some(label) = volume_label.take()
                 && let Some(uri) = phone_uri(uri)
             {
-                volumes
-                    .entry(uri)
-                    .or_insert_with(|| (label.to_owned(), false));
+                volumes.entry(uri).or_insert_with(|| GioVolume {
+                    label: label.to_owned(),
+                    mounted: false,
+                });
             }
         } else if let Some((label, uri)) = line
             .strip_prefix("Mount(")
@@ -106,10 +113,11 @@ fn parse_volumes(list: &str) -> BTreeMap<String, (String, bool)> {
             .and_then(|(_, mount)| mount.rsplit_once(" -> "))
         {
             if let Some(uri) = phone_uri(uri) {
-                let entry = volumes
-                    .entry(uri)
-                    .or_insert_with(|| (label.to_owned(), true));
-                entry.1 = true;
+                let entry = volumes.entry(uri).or_insert_with(|| GioVolume {
+                    label: label.to_owned(),
+                    mounted: true,
+                });
+                entry.mounted = true;
             }
         } else if line.starts_with("Drive(") {
             volume_label = None;
@@ -172,7 +180,8 @@ mod tests {
 
     #[test]
     fn matches_fuse_and_gio_spellings_of_a_phone() {
-        let fuse = fuse_phone_uri("mtp:host=%5Busb%3A001%2C005%5D").unwrap();
+        let fuse =
+            fuse_phone_uri("mtp:host=%5Busb%3A001%2C005%5D").expect("MTP 挂载名应解析为 URI");
         assert_eq!(phone_key(&fuse), phone_key("mtp://[usb:001,005]/"));
         assert!(fuse_phone_uri("smb-share:server=nas,share=doc").is_none());
     }
@@ -183,7 +192,15 @@ mod tests {
             "Drive(0): Device\n  Volume(0): Pixel\n    activation_root=mtp://Pixel/\n  Mount(0): Pixel -> mtp://Pixel\nVolume(1): iPhone\n  activation_root=afc://iPhone/\nMount(1): Share -> smb://nas/share\n",
         );
         assert_eq!(volumes.len(), 2);
-        assert_eq!(volumes["mtp://Pixel/"], ("Pixel".to_owned(), true));
-        assert_eq!(volumes["afc://iPhone/"], ("iPhone".to_owned(), false));
+        assert_eq!(volumes["mtp://Pixel/"].label, "Pixel");
+        assert!(
+            volumes["mtp://Pixel/"].mounted,
+            "GIO 同时列出了 Pixel 的挂载项"
+        );
+        assert_eq!(volumes["afc://iPhone/"].label, "iPhone");
+        assert!(
+            !volumes["afc://iPhone/"].mounted,
+            "GIO 只列出了 iPhone 的卷"
+        );
     }
 }

@@ -1,5 +1,6 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{Icon, menu::PopupMenuItem};
+use gpui_kit::component::Icon;
+use gpui_kit::component::menu::PopupMenuItem;
 use gpui_kit::prelude::*;
 use gpui_kit::{Context, Pixels, SharedString, WeakEntity, Window, px};
 

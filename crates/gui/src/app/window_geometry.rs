@@ -5,7 +5,8 @@ use std::time::Duration;
 use gpui_kit::*;
 use settings::config::workspace::{WindowSize, Workspace};
 
-use super::{App, io_queue::IoQueue};
+use super::App;
+use super::io_queue::IoQueue;
 use crate::style::{MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_WIDTH};
 
 const SAVE_DELAY: Duration = Duration::from_millis(400);

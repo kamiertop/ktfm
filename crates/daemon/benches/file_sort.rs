@@ -3,15 +3,14 @@
 //! 排序计时排除目录读取、输入复制和结果校验。
 
 use std::collections::HashMap;
-use std::hint::black_box;
+use std::hint;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use daemon::browse::{
-    DirectorySnapshot, FileSort, ReadSource, SortColumn, SortDirection, type_sort_key,
-};
-use rayon::prelude::*;
+use daemon::browse;
+use daemon::browse::{DirectorySnapshot, FileSort, ReadSource, SortColumn, SortDirection};
+use rayon::slice::ParallelSliceMut;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use vfs::{Entry, EntryKind};
 
@@ -22,7 +21,7 @@ fn main() {
     let pool = ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
-        .unwrap();
+        .expect("基准测试需要可用的 Rayon 线程池");
     println!("Rayon threads: {threads}; times are median microseconds (21 runs)");
     println!(
         "{:>8}  {:<19}  {:>11}  {:>11}  {:>8}",
@@ -64,7 +63,7 @@ fn benchmark_directory(pool: &ThreadPool, path: &std::path::Path) -> std::io::Re
             snapshot.directory.entries.len()
         );
         assert_eq!(fresh.directory.read_errors, 0);
-        black_box(fresh);
+        hint::black_box(fresh);
     }
     println!(
         "Directory {}: {} entries; warm read median {:.2} ms (5 runs)",
@@ -82,14 +81,14 @@ fn benchmark_directory(pool: &ThreadPool, path: &std::path::Path) -> std::io::Re
         ),
     ] {
         let filter =
-            || snapshot.visible_entries(black_box("driver"), true, sort, &counts, &cancelled);
+            || snapshot.visible_entries(hint::black_box("driver"), true, sort, &counts, &cancelled);
         let matches = filter().len();
         let mut samples = (0..21)
             .map(|_| {
                 let started = Instant::now();
                 let entries = filter();
                 let elapsed = started.elapsed();
-                black_box(entries);
+                hint::black_box(entries);
                 elapsed
             })
             .collect::<Vec<_>>();
@@ -122,7 +121,7 @@ fn benchmark_sort(pool: &ThreadPool, entries: &[Entry], counts: &[Option<u64>]) 
             pool.install(|| {
                 if column == SortColumn::Kind {
                     rows.par_sort_by_cached_key(|&index| {
-                        type_sort_key(entries, index, SortDirection::Ascending)
+                        browse::type_sort_key(entries, index, SortDirection::Ascending)
                     });
                 } else {
                     rows.par_sort_unstable_by(|&a, &b| sort.compare(entries, a, b, child_count));
@@ -177,9 +176,9 @@ fn median_us(samples: &mut [Duration]) -> f64 {
 fn time(input: &[usize], sort: impl FnOnce(&mut [usize])) -> Duration {
     let mut rows = input.to_vec();
     let started = Instant::now();
-    sort(black_box(&mut rows));
+    sort(hint::black_box(&mut rows));
     let elapsed = started.elapsed();
-    black_box(rows);
+    hint::black_box(rows);
     elapsed
 }
 

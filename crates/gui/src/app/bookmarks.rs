@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Dialog;
-use gpui_kit::base::Disableable as _;
+use gpui_kit::base::{Dialog, Disableable as _};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Icon, h_flex, v_flex};

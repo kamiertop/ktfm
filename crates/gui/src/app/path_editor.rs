@@ -7,10 +7,8 @@ use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use super::{
-    App,
-    keymap::{CancelPathEdit, NextPathSuggestion, PreviousPathSuggestion, SubmitPathEdit},
-};
+use super::App;
+use super::keymap::{CancelPathEdit, NextPathSuggestion, PreviousPathSuggestion, SubmitPathEdit};
 use crate::components::popup_surface;
 use crate::style::file_selection_color;
 

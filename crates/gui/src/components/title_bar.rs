@@ -4,7 +4,8 @@ use gpui_kit::component::{ActiveTheme, Icon, Theme, ThemeMode, h_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 
-use super::{icon_button, window_controls::window_controls, with_tooltip};
+use super::window_controls::window_controls;
+use super::{icon_button, with_tooltip};
 use crate::style::{
     SIDEBAR_WIDTH, TITLE_BAR_HEIGHT, TITLE_ICON_SIZE, WINDOW_RADIUS, icon_color,
     preferences_palette,

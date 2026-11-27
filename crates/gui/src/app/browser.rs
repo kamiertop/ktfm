@@ -2,7 +2,8 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Duration;
 
 use super::App;
@@ -1115,7 +1116,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use gpui_kit::{Modifiers, px};
-    use std::{path::Path, sync::Arc};
+    use std::path::Path;
+    use std::sync::Arc;
 
     use super::{Browser, DirectoryState, RecentDirectories, RecentDirectory};
     use vfs::{Directory, Entry, EntryKind};

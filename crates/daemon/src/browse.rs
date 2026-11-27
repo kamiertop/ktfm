@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 
-use vfs::{Directory, read_directory, read_references};
+use vfs::Directory;
 
 mod counts;
 mod sort;
@@ -15,22 +16,26 @@ mod sort;
 pub use counts::{ChildCount, ChildCountMonitor, ChildCountUpdate};
 pub use sort::{FileSort, SortColumn, SortDirection, type_sort_key};
 
+/// 一次浏览读取的结果，以及按路径定位条目的索引。
 pub struct DirectorySnapshot {
     pub directory: Directory,
     pub indices: HashMap<PathBuf, usize>,
 }
 
 impl DirectorySnapshot {
+    /// 读取目录或标签引用。取消时返回 `Interrupted`。
     pub fn read(source: ReadSource, cancelled: &AtomicBool) -> io::Result<Self> {
         let is_cancelled = || cancelled.load(Relaxed);
         let directory = match source {
-            ReadSource::Directory(path) => read_directory(&path, is_cancelled)?,
-            ReadSource::Tag(paths) => read_references(paths, is_cancelled)?,
+            ReadSource::Directory(path) => vfs::read_directory(&path, is_cancelled)?,
+            ReadSource::Tag(paths) => vfs::read_references(paths, is_cancelled)?,
             ReadSource::MissingTag => return Err(io::Error::other("标签已删除")),
         };
         Ok(Self::new(directory))
     }
 
+    /// 返回符合筛选条件的条目索引。未指定排序时保留快照顺序。
+    #[must_use]
     pub fn visible_entries(
         &self,
         query: &str,
@@ -48,6 +53,8 @@ impl DirectorySnapshot {
         visible
     }
 
+    /// 为已有目录结果建立路径索引。
+    #[must_use]
     pub fn new(directory: Directory) -> Self {
         let indices = directory
             .entries
@@ -59,6 +66,7 @@ impl DirectorySnapshot {
     }
 }
 
+/// 目录快照的读取来源，包括已失效的标签。
 pub enum ReadSource {
     Directory(PathBuf),
     Tag(Vec<PathBuf>),

@@ -8,7 +8,8 @@ use settings::config::tab::Location;
 use sys::mount::{self, UnlockMountError, VolumeSource};
 use zeroize::Zeroizing;
 
-use super::{App, menu::app_menu_item};
+use super::App;
+use super::menu::app_menu_item;
 
 mod dialog;
 mod storage;

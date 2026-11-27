@@ -1,3 +1,5 @@
+//! 本地条目枚举、元数据和目录监听。
+
 mod access;
 pub use access::EntryAccess;
 

@@ -12,7 +12,8 @@ use hex_color::HexColor;
 use turso::{Builder, Connection, Row, Value, params};
 use uuid::Uuid;
 
-use crate::config::{APP_NAME, workspace::SavedPath};
+use crate::config::APP_NAME;
+use crate::config::workspace::SavedPath;
 use crate::tag::{Tag, TagItem};
 use crate::{Error, Result};
 

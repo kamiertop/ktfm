@@ -1,12 +1,11 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::{
-    Icon,
-    menu::{PopupMenu, PopupMenuItem},
-};
+use gpui_kit::component::Icon;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::prelude::*;
 use gpui_kit::{Context, WeakEntity, Window};
 use settings::command::AppCommand;
-use settings::config::{bookmark::BookmarkKind, tab::Location};
+use settings::config::bookmark::BookmarkKind;
+use settings::config::tab::Location;
 use vfs::EntryKind;
 
 use super::App;
@@ -245,7 +244,7 @@ impl App {
                 "属性",
                 IconName::Info,
                 FileAction::Properties,
-                target.clone(),
+                target,
                 false,
                 owner,
             ));

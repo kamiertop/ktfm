@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering::Relaxed},
-};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, SystemTime};
 
 use async_io::Timer;
-use vfs::{DirectoryWatch, read_child_count};
+use vfs::DirectoryWatch;
 
 use super::{DirectorySnapshot, FileSort};
 
@@ -121,7 +120,7 @@ fn refresh_child_counts(
             continue;
         }
         let count = if metadata.is_some() {
-            let Ok(count) = read_child_count(path, || cancelled.load(Relaxed)) else {
+            let Ok(count) = vfs::read_child_count(path, || cancelled.load(Relaxed)) else {
                 break;
             };
             count

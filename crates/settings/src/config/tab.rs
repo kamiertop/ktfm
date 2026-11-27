@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{view::ViewMode, workspace::SavedPath};
+use super::view::ViewMode;
+use super::workspace::SavedPath;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -161,9 +162,9 @@ impl From<SplitSession> for GridSession {
                 }];
                 if panes.len() == 2 {
                     columns.push(PaneColumn::default());
-                    columns
-                        .iter_mut()
-                        .for_each(|column| column.width_ratio = 0.5);
+                    for column in &mut columns {
+                        column.width_ratio = 0.5;
+                    }
                 }
                 columns
             }

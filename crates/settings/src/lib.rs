@@ -1,3 +1,5 @@
+//! 应用配置、工作区和标签的本地持久化。
+
 pub mod command;
 pub mod config;
 pub mod error;

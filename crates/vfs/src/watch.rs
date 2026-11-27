@@ -11,6 +11,7 @@ pub struct DirectoryWatch {
 }
 
 impl DirectoryWatch {
+    /// 注册非递归目录监听，报告直接子项的变动。
     pub fn new(path: &Path) -> notify::Result<Self> {
         Self::watch(path, entry_change)
     }
@@ -71,10 +72,12 @@ impl DirectoryWatch {
         Ok((watcher, changes))
     }
 
+    /// 等待下一次变化。事件通道关闭时返回 `false`。
     pub async fn changed(&self) -> bool {
         self.changes.recv().await.is_ok()
     }
 
+    /// 清掉已合并到本轮刷新的一个待处理通知。
     pub fn coalesce(&self) {
         match self.changes.try_recv() {
             Ok(()) | Err(TryRecvError::Empty | TryRecvError::Closed) => {}
@@ -91,10 +94,8 @@ fn entry_change(event: &Event) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs, thread,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
+    use std::{fs, thread};
 
     use super::*;
 

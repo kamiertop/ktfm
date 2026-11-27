@@ -247,8 +247,9 @@ impl App {
                         section(cx).children(volumes).when_some(
                             storage
                                 .error
-                                .clone()
-                                .or_else(|| storage.discovery_error().cloned()),
+                                .as_deref()
+                                .or_else(|| storage.discovery_error())
+                                .map(str::to_owned),
                             |group, message| {
                                 group
                                     .child(div().px_1().text_sm().text_color(danger).child(message))

@@ -5,7 +5,8 @@ mod model;
 mod style;
 
 use gpui_kit::assets::AllAssets;
-use tracing_subscriber::{EnvFilter, filter::LevelFilter};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 fn main() {
     tracing_subscriber::fmt()

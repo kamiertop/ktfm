@@ -46,10 +46,10 @@ impl gpui_kit::RenderOnce for AnchoredTooltipButton {
         window: &mut gpui_kit::Window,
         cx: &mut gpui_kit::App,
     ) -> impl gpui_kit::IntoElement {
-        use std::{cell::Cell, rc::Rc};
+        use std::cell::Cell;
+        use std::rc::Rc;
 
-        use gpui_kit::base::{ElementExt as _, Placement};
-        use gpui_kit::base::{TooltipOverlay, TooltipRequest};
+        use gpui_kit::base::{ElementExt as _, Placement, TooltipOverlay, TooltipRequest};
         use gpui_kit::{Bounds, ElementId, MouseButton, Pixels};
 
         let overlay = window.use_keyed_state((ElementId::from(self.id), "tooltip"), cx, |_, _| {

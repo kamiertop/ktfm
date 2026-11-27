@@ -1,12 +1,12 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use std::{fs, io};
 
 use crate::access::{AccessReader, EntryAccess};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 条目本身的类型。符号链接独立分类，丢失的引用标为 `Missing`。
 pub enum EntryKind {
     Directory,
     File,
@@ -16,6 +16,7 @@ pub enum EntryKind {
 }
 
 #[derive(Debug)]
+/// 路径及其已知元数据。无法读取的元数据保留为空。
 pub struct Entry {
     pub name: OsString,
     pub path: PathBuf,
@@ -28,12 +29,15 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// 按 Unix 文件名惯例，以点开头的名称视为隐藏。
+    #[must_use]
     pub fn is_hidden(&self) -> bool {
         self.name.as_encoded_bytes().starts_with(b".")
     }
 }
 
 #[derive(Debug)]
+/// 一批可读取的条目，连同枚举期间遇到的局部错误数。
 pub struct Directory {
     pub entries: Vec<Entry>,
     pub read_errors: usize,

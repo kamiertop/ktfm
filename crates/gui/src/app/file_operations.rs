@@ -2,10 +2,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use daemon::{
-    files,
-    job::{FileJob, JobKind, JobResult},
-};
+use daemon::files;
+use daemon::files::{CreateKind, TransferMode};
+use daemon::job::{FileJob, JobKind, JobResult};
 use gpui_kit::base::{Dialog, Disableable as _};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -14,7 +13,9 @@ use gpui_kit::prelude::*;
 use gpui_kit::*;
 use vfs::EntryKind;
 
-use super::{App, browser::DirectoryState, volumes::SharedStorage};
+use super::App;
+use super::browser::DirectoryState;
+use super::volumes::SharedStorage;
 use crate::components::popup_surface;
 use crate::model::entry_appearance;
 
@@ -75,7 +76,7 @@ impl Action for FileAction {
 #[derive(Default)]
 pub(super) struct FileClipboard {
     paths: Arc<[PathBuf]>,
-    cut: bool,
+    transfer_mode: TransferMode,
     revision: u64,
     pasting: bool,
 }
@@ -90,20 +91,24 @@ impl FileClipboard {
     pub(super) fn cancel_cut(&mut self) {
         if self.can_cancel_cut() {
             self.paths = Arc::default();
-            self.cut = false;
+            self.transfer_mode = TransferMode::Copy;
             self.revision += 1;
         }
     }
 
     pub(super) fn pending_cut_paths(&self) -> &[PathBuf] {
-        if self.cut { &self.paths } else { &[] }
+        if self.transfer_mode == TransferMode::Move {
+            &self.paths
+        } else {
+            &[]
+        }
     }
 
     fn finish_job(&mut self, outcome: &JobResult, revision: u64) {
         if matches!(outcome.kind, JobKind::Transfer { .. }) {
             self.pasting = false;
         }
-        if self.revision != revision || !self.cut {
+        if self.revision != revision || self.transfer_mode != TransferMode::Move {
             return;
         }
         let sources = outcome
@@ -137,7 +142,9 @@ impl FileClipboard {
                     .cloned()
                     .collect();
             }
-            JobKind::Transfer { cut: true } => {
+            JobKind::Transfer {
+                mode: TransferMode::Move,
+            } => {
                 let sources = sources
                     .map(|(source, _)| source)
                     .collect::<std::collections::HashSet<_>>();
@@ -148,7 +155,10 @@ impl FileClipboard {
                     .cloned()
                     .collect();
             }
-            JobKind::Create | JobKind::Transfer { cut: false } => {}
+            JobKind::Create
+            | JobKind::Transfer {
+                mode: TransferMode::Copy,
+            } => {}
         }
     }
 }
@@ -170,7 +180,7 @@ impl FileJobs {
 }
 
 enum NameTarget {
-    Create { parent: PathBuf, folder: bool },
+    Create { parent: PathBuf, kind: CreateKind },
     Rename(PathBuf),
 }
 
@@ -302,17 +312,17 @@ impl App {
                     DirectoryState::Ready(_)
                 ) && let Some(path) = self.location()
                 {
-                    let folder = matches!(action, FileAction::NewFolder);
+                    let (kind, default_name) = if action == FileAction::NewFolder {
+                        (CreateKind::Directory, "新建文件夹")
+                    } else {
+                        (CreateKind::Document, "新建文档.txt")
+                    };
                     self.edit_file_name(
                         NameTarget::Create {
                             parent: path.to_owned(),
-                            folder,
+                            kind,
                         },
-                        if folder {
-                            "新建文件夹"
-                        } else {
-                            "新建文档.txt"
-                        },
+                        default_name,
                         window,
                         cx,
                     );
@@ -352,7 +362,11 @@ impl App {
                     let clipboard = cx.global_mut::<FileClipboard>();
                     clipboard.revision += 1;
                     clipboard.paths = paths.into();
-                    clipboard.cut = matches!(action, FileAction::Cut);
+                    clipboard.transfer_mode = if action == FileAction::Cut {
+                        TransferMode::Move
+                    } else {
+                        TransferMode::Copy
+                    };
                     self.panes[self.pane_target].browser.action_error = None;
                     cx.notify();
                 }
@@ -370,7 +384,7 @@ impl App {
                     let job = FileJob::Transfer {
                         sources: clipboard.paths.clone(),
                         directory,
-                        cut: clipboard.cut,
+                        mode: clipboard.transfer_mode,
                     };
                     self.run_file_job(job, window, cx);
                 }
@@ -442,11 +456,8 @@ impl App {
         };
         let value = editor.input.read(cx).value();
         let target = match &editor.target {
-            NameTarget::Create { parent, folder } => {
-                files::named_path(parent, &value).map(|path| FileJob::Create {
-                    path,
-                    folder: *folder,
-                })
+            NameTarget::Create { parent, kind } => {
+                files::named_path(parent, &value).map(|path| FileJob::Create { path, kind: *kind })
             }
             NameTarget::Rename(source) => source
                 .parent()
@@ -762,8 +773,14 @@ impl App {
     ) -> Option<impl IntoElement + use<>> {
         let editor = self.file_name_editor.as_ref()?;
         let label = match editor.target {
-            NameTarget::Create { folder: true, .. } => "新建文件夹",
-            NameTarget::Create { folder: false, .. } => "新建文档",
+            NameTarget::Create {
+                kind: CreateKind::Directory,
+                ..
+            } => "新建文件夹",
+            NameTarget::Create {
+                kind: CreateKind::Document,
+                ..
+            } => "新建文档",
             NameTarget::Rename(_) => "重命名",
         };
         let running = self.file_job.is_some();
@@ -826,6 +843,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{FileClipboard, JobKind, JobResult, PathBuf};
+    use daemon::files::TransferMode;
     use daemon::job::ItemResult;
 
     #[test]
@@ -838,7 +856,7 @@ mod tests {
         state.cancel_cut();
         assert_eq!(state.paths, paths);
 
-        state.cut = true;
+        state.transfer_mode = TransferMode::Move;
         state.pasting = true;
         state.cancel_cut();
         assert_eq!(state.paths, paths);
@@ -846,7 +864,7 @@ mod tests {
         state.pasting = false;
         state.cancel_cut();
         assert!(state.paths.is_empty());
-        assert!(!state.cut);
+        assert_eq!(state.transfer_mode, TransferMode::Copy);
         assert_eq!(state.revision, 1);
     }
 
@@ -856,7 +874,7 @@ mod tests {
             paths: ["/source", "/source/file", "/source-other"]
                 .map(PathBuf::from)
                 .into(),
-            cut: true,
+            transfer_mode: TransferMode::Move,
             ..Default::default()
         };
         state.finish_job(
@@ -892,12 +910,14 @@ mod tests {
     fn cut_paste_removes_only_successful_sources_from_the_same_clipboard() {
         let mut state = FileClipboard {
             paths: ["/moved", "/failed", "/other"].map(PathBuf::from).into(),
-            cut: true,
+            transfer_mode: TransferMode::Move,
             revision: 2,
             pasting: true,
         };
         let result = JobResult {
-            kind: JobKind::Transfer { cut: true },
+            kind: JobKind::Transfer {
+                mode: TransferMode::Move,
+            },
             items: vec![
                 ItemResult {
                     source: Some("/moved".into()),

@@ -9,7 +9,7 @@ mod desktop {
 
     use xdg_mime::SharedMimeInfo;
 
-    use super::*;
+    use super::{OsStr, PathBuf};
 
     pub fn icon_names(name: &OsStr) -> (Option<String>, Vec<String>) {
         static MIME: OnceLock<SharedMimeInfo> = OnceLock::new();
@@ -31,7 +31,8 @@ mod desktop {
     fn theme_from_ini(path: &Path, section: &str, key: &str) -> Option<String> {
         let contents = std::fs::read_to_string(path).ok()?;
         let mut in_section = false;
-        for line in contents.lines().map(str::trim) {
+        let lines = contents.lines().map(str::trim);
+        for line in lines {
             if let Some(header) = line
                 .strip_prefix('[')
                 .and_then(|line| line.strip_suffix(']'))

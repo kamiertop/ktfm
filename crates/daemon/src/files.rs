@@ -1,10 +1,25 @@
 //! 在后台执行本地文件操作，目标同名时保留原有文件。
 
-use std::fs;
-use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::{fs, io};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 用于创建空文档或空目录的文件任务。
+pub enum CreateKind {
+    Document,
+    Directory,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// 决定传输成功后是否保留源文件。
+pub enum TransferMode {
+    #[default]
+    Copy,
+    Move,
+}
+
+/// 将单个文件名拼接到父目录。拒绝空名称、路径分隔符和特殊路径组件。
 pub fn named_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
     let mut components = Path::new(name).components();
     if name.contains(['/', '\0'])
@@ -20,14 +35,15 @@ pub fn named_path(parent: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(parent.join(name))
 }
 
-pub fn create(path: &Path, folder: bool) -> io::Result<()> {
-    if folder {
-        fs::create_dir(path)
-    } else {
-        fs::File::create_new(path).map(drop)
+/// 创建空文件或空目录。如果目标已存在，返回 `AlreadyExists`。
+pub fn create(path: &Path, kind: CreateKind) -> io::Result<()> {
+    match kind {
+        CreateKind::Document => fs::File::create_new(path).map(drop),
+        CreateKind::Directory => fs::create_dir(path),
     }
 }
 
+/// 重命名且拒绝覆盖已有目标。源路径与目标路径相同时直接成功。
 pub fn rename(source: &Path, target: &Path) -> io::Result<()> {
     if source == target {
         return Ok(());
@@ -47,7 +63,8 @@ fn rename_without_replace(_: &Path, _: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-pub fn transfer(source: &Path, directory: &Path, cut: bool) -> io::Result<()> {
+/// 将源项目传输到指定目录，保留原有的同名文件。移动时保留符号链接本身。
+pub fn transfer(source: &Path, directory: &Path, mode: TransferMode) -> io::Result<()> {
     let name = source.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let directory = directory.canonicalize()?;
     let metadata = fs::symlink_metadata(source)?;
@@ -58,7 +75,7 @@ pub fn transfer(source: &Path, directory: &Path, cut: bool) -> io::Result<()> {
         ));
     }
     let target = directory.join(name);
-    if cut {
+    if mode == TransferMode::Move {
         if source
             .parent()
             .map(Path::canonicalize)
@@ -116,11 +133,11 @@ mod tests {
     fn creates_empty_documents_without_overwriting_existing_entries() -> io::Result<()> {
         let root = tempfile::tempdir()?;
         let path = root.path().join("document.txt");
-        create(&path, false)?;
+        create(&path, CreateKind::Document)?;
         assert_eq!(fs::metadata(&path)?.len(), 0);
         fs::write(&path, b"original")?;
         assert_eq!(
-            create(&path, false).unwrap_err().kind(),
+            create(&path, CreateKind::Document).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
         assert_eq!(fs::read(&path)?, b"original");
@@ -129,7 +146,7 @@ mod tests {
         let missing = root.path().join("missing");
         std::os::unix::fs::symlink(&missing, &link)?;
         assert_eq!(
-            create(&link, false).unwrap_err().kind(),
+            create(&link, CreateKind::Document).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists
         );
         assert!(!missing.exists());
@@ -146,8 +163,8 @@ mod tests {
         fs::write(source.join("file"), b"original")?;
         assert!(named_path(root.path(), "../other").is_err());
         assert!(named_path(root.path(), "source/").is_err());
-        assert!(transfer(&source, &source.join("child"), false).is_err());
-        transfer(&source, &destination, false)?;
+        assert!(transfer(&source, &source.join("child"), TransferMode::Copy).is_err());
+        transfer(&source, &destination, TransferMode::Copy)?;
         assert_eq!(fs::read(destination.join("source/file"))?, b"original");
         assert_eq!(
             rename(&source, &destination).unwrap_err().kind(),
@@ -163,7 +180,7 @@ mod tests {
         let dest = root.path().join("dest");
         fs::create_dir(&dest)?;
         std::os::unix::fs::symlink("missing", &source)?;
-        transfer(&source, &dest, true)?;
+        transfer(&source, &dest, TransferMode::Move)?;
         assert!(source.symlink_metadata().is_err());
         assert_eq!(fs::read_link(dest.join("link"))?, Path::new("missing"));
         Ok(())

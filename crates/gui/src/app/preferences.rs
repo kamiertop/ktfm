@@ -10,24 +10,23 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use settings::config::{
-    AppConfig, ViewConfig,
-    action::{BlankDoubleClickAction, FolderMiddleClickAction, TabMiddleClickAction},
-    shortcuts::ShortcutConfig,
-    terminal::{
-        DEFAULT_FONT_SIZE, FONT_SIZE_RANGE, TerminalConfig, TerminalCursorShape, TerminalMode,
-    },
-    view::{FileDateFormat, ViewMode},
+use settings::config::action::{
+    BlankDoubleClickAction, FolderMiddleClickAction, TabMiddleClickAction,
 };
+use settings::config::shortcuts::ShortcutConfig;
+use settings::config::terminal::{
+    DEFAULT_FONT_SIZE, FONT_SIZE_RANGE, TerminalConfig, TerminalCursorShape, TerminalMode,
+};
+use settings::config::view::{FileDateFormat, ViewMode};
+use settings::config::{AppConfig, ViewConfig};
 
-use super::App;
 use super::embed_terminal::parse_background;
 use super::io_queue::IoQueue;
 use super::keymap::{
     SHORTCUTS, ShortcutGroup, ShortcutScope, bind_all, parse_shortcut, shortcut_os, unbind_all,
     validate,
 };
-use super::window_resize;
+use super::{App, window_resize};
 use crate::components::preferences_title_bar;
 use crate::style::{APP_ID, WINDOW_RADIUS, preferences_palette};
 
@@ -1073,7 +1072,9 @@ impl Preferences {
         ] {
             let mut rows = Vec::new();
             for (index, entry) in SHORTCUTS.iter().enumerate() {
-                if entry.group == group && shortcut_matches(entry, &self.draft.shortcuts, &query) {
+                if entry.group == group
+                    && shortcut_matches(entry, &self.draft.shortcuts, query.as_deref())
+                {
                     matched += 1;
                     rows.push(self.shortcut_row(index, cx));
                 }
@@ -1633,7 +1634,7 @@ fn held_modifier_labels(modifiers: &Modifiers) -> Vec<&'static str> {
 fn shortcut_matches(
     entry: &super::keymap::ShortcutEntry,
     shortcuts: &settings::config::shortcuts::ShortcutConfig,
-    query: &Option<String>,
+    query: Option<&str>,
 ) -> bool {
     let Some(query) = query else {
         return true;

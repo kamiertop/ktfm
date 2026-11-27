@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use daemon::files::TransferMode;
 use daemon::job::JobKind;
 use gpui_kit::assets::IconName;
 
@@ -251,8 +252,12 @@ impl App {
                     status.push_str(match job {
                         JobKind::Create => " · 正在新建…",
                         JobKind::Rename => " · 正在重命名…",
-                        JobKind::Transfer { cut: false } => " · 正在复制…",
-                        JobKind::Transfer { cut: true } => " · 正在移动…",
+                        JobKind::Transfer {
+                            mode: TransferMode::Copy,
+                        } => " · 正在复制…",
+                        JobKind::Transfer {
+                            mode: TransferMode::Move,
+                        } => " · 正在移动…",
                         JobKind::Trash => " · 正在移到回收站…",
                     });
                 }

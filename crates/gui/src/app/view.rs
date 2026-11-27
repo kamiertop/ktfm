@@ -4,12 +4,10 @@ use super::panes::{BrowserPane, PaneLayout};
 use gpui_kit::component::{ActiveTheme, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
-use settings::config::{
-    AppConfig,
-    bookmark::{BookmarkKind, Bookmarks},
-    tab::{Location, SplitLayout},
-    workspace::Workspace,
-};
+use settings::config::AppConfig;
+use settings::config::bookmark::{BookmarkKind, Bookmarks};
+use settings::config::tab::{Location, SplitLayout};
+use settings::config::workspace::Workspace;
 
 use super::bookmarks::{BookmarkProperties, BookmarkRename};
 use super::file_operations::{FileAction, FileClipboard, FileJobs, FileNameEditor, FileProperties};

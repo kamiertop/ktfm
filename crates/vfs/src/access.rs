@@ -2,11 +2,13 @@
 use nix::unistd::{Gid, Group, Uid, User};
 #[cfg(unix)]
 use std::collections::HashMap;
+use std::fs::Metadata;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
-use std::{fs::Metadata, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Debug)]
+/// POSIX 所有者、所属组与权限位。账号无法解析时以数字 ID 表示。
 pub struct EntryAccess {
     pub owner: Arc<str>,
     pub group: Arc<str>,

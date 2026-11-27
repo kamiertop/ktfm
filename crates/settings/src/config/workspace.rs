@@ -1,14 +1,14 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    APP_NAME, AppConfig, bookmark::Bookmarks, file_columns::FileListColumns, tab::Session,
-};
+use super::bookmark::Bookmarks;
+use super::file_columns::FileListColumns;
+use super::tab::Session;
+use super::{APP_NAME, AppConfig};
 use crate::{Error, Result};
 
 const FILE_NAME: &str = "workspace.toml";
@@ -329,11 +329,13 @@ mod tests {
         fs::create_dir(&dir)?;
         let result = (|| {
             let file = dir.join(FILE_NAME);
-            let mut workspace = Workspace::default();
-            workspace.window_size = Some(WindowSize {
-                width: 1440.,
-                height: 860.,
-            });
+            let workspace = Workspace {
+                window_size: Some(WindowSize {
+                    width: 1440.,
+                    height: 860.,
+                }),
+                ..Workspace::default()
+            };
             workspace.save_to(&file)?;
 
             let restored = Workspace::load_from(&file)?;

@@ -3,8 +3,9 @@ use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 
 use futures_lite::io::{AsyncBufReadExt as _, AsyncRead, BufReader};
-use rustix::process::{Signal, getpid, getppid, set_parent_process_death_signal};
+use rustix::process::{self, Signal};
 
+/// 监听 GIO 卷事件。监视进程就绪时也调用一次回调，以补读启动期间的变化。
 pub async fn watch_volumes(changed: impl FnMut()) -> io::Result<()> {
     let mut command = Command::new("gio");
     command
@@ -13,12 +14,14 @@ pub async fn watch_volumes(changed: impl FnMut()) -> io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let parent = getpid();
-    // 子进程在应用异常退出时也要停止；这里只调用 Linux 系统调用。
+    let parent = process::getpid();
+    // 父进程死亡信号必须在子进程中、执行 GIO 前设置，Command 没有对应的安全接口。
+    // SAFETY: fork 后只调用 Linux 的 prctl 和 getppid，捕获值为可复制的 PID，
+    // 错误路径只转换操作系统错误码或 ErrorKind，不分配内存或获取锁。
     unsafe {
         command.pre_exec(move || {
-            set_parent_process_death_signal(Some(Signal::TERM))?;
-            if getppid() != Some(parent) {
+            process::set_parent_process_death_signal(Some(Signal::TERM))?;
+            if process::getppid() != Some(parent) {
                 return Err(io::ErrorKind::Interrupted.into());
             }
             Ok(())
